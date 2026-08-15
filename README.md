@@ -1,6 +1,6 @@
-# agent-skills
+# John Wang's agent skills
 
-Portable [Agent Skills](https://agentskills.io/specification) for Claude Code, Cursor, Codex, and other coding agents that read `SKILL.md`.
+Personal [Agent Skills](https://agentskills.io/specification) I use across Claude Code, Cursor, Codex, and any other coding agent that reads `SKILL.md`. This is my own set, not a shared pack for other people to install as-is.
 
 One repo, one canonical copy. Installers drop the folders into each agent's skills directory.
 
