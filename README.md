@@ -25,11 +25,15 @@ skills/
   create-skill/
     SKILL.md
     references/
+  review-pr/
+    SKILL.md
 ```
 
 Each skill is a directory whose name matches the `name` field in `SKILL.md`. Keep the body short. Put long docs in `references/` and anything deterministic in `scripts/`.
 
 Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This repo is the portable source of truth.
+
+`review-pr` prepares a human review guide to a PR's architecture, models, tradeoffs, and consequential design decisions, with selected code excerpts and focused review questions. Try: “Use review-pr to show me the decisions that deserve my attention in PR <url>.”
 
 ## Add a skill
 
