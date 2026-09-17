@@ -68,7 +68,7 @@ func TestAdaptersRetainVisibleSiblingBlocksAndDeriveModelToolMetadata(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Counts.Turns == nil || *metadata.Counts.Turns != 1 || metadata.Counts.ToolCalls == nil || *metadata.Counts.ToolCalls != 1 {
+	if metadata.Counts.Turns != nil || metadata.Counts.Messages == nil || *metadata.Counts.Messages != 1 || metadata.Counts.ToolCalls == nil || *metadata.Counts.ToolCalls != 1 {
 		t.Fatalf("metadata counts = %#v", metadata.Counts)
 	}
 	if len(metadata.Models) != 1 || metadata.Models[0].Attributes["gen_ai.request.model"] != "gpt-6-astra" {

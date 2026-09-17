@@ -172,6 +172,7 @@ type ParserInfo struct {
 // invented zero after a partial or failed parse.
 type Counts struct {
 	Turns            *int `json:"turns,omitempty"`
+	Messages         *int `json:"messages,omitempty"`
 	ToolCalls        *int `json:"tool_calls,omitempty"`
 	ExplicitFeedback *int `json:"explicit_feedback,omitempty"`
 }
@@ -184,8 +185,9 @@ type ModelSummary struct {
 }
 
 type SkillSnapshot struct {
-	Name   string `json:"name"`
-	SHA256 string `json:"sha256,omitempty"`
+	Name     string `json:"name"`
+	SHA256   string `json:"sha256,omitempty"`
+	Coverage string `json:"coverage,omitempty"`
 }
 
 type SkillUse struct {

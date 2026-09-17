@@ -100,6 +100,8 @@ var allowedKeys = map[string]bool{
 	"tool_result": true, "call_id": true, "input": true, "output": true, "result": true, "arguments": true,
 	"command": true, "path": true, "query": true, "url": true, "description": true,
 	"status": true, "turn_id": true, "reasoning_effort": true, "name": true, "items": true, "data": true,
+	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
+	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
 }
 
 var blockedKeys = map[string]bool{
