@@ -225,3 +225,40 @@ func hasGap(gaps []CaptureGap, code string) bool {
 	}
 	return false
 }
+
+func TestCursorTextFailsClosedAndTypelessJSONLWorks(t *testing.T) {
+	if _, err := (CursorAdapter{}).FilterText(strings.NewReader("system: hidden\nunknown raw"), time.Now()); !IsFilterError(err) {
+		t.Fatalf("err=%v", err)
+	}
+	filtered, err := (CursorAdapter{}).FilterJSONL(strings.NewReader(`{"role":"assistant","content":"visible"}`))
+	if err != nil || len(filtered.Records) != 1 {
+		t.Fatalf("%v %#v", err, filtered)
+	}
+}
+
+func TestPreciseNativeSkillReadInference(t *testing.T) {
+	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: time.Now()}, NativeRecords: []map[string]any{{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "/skills/review-pr/SKILL.md"}}, {"type": "function_call", "command": "cat /skills/create/SKILL.md"}, {"type": "message", "role": "user", "content": "echo SKILL.md"}}}
+	m, err := BuildMetadata(bundle, "m", time.Now(), time.Now(), SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.SkillsUsed) != 2 || m.SkillsUsed[0].Name != "create" || m.SkillsUsed[1].Name != "review-pr" {
+		t.Fatalf("%#v", m.SkillsUsed)
+	}
+}
+
+func TestHookModelAndAssistantOnlyFinalReconciliation(t *testing.T) {
+	now := time.Now()
+	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"role": "user", "id": "u", "turn_id": "t", "content": "q"}, {"role": "assistant", "id": "a", "turn_id": "t", "content": "a"}}, SupplementalEvidence: []SupplementalEvidence{{Kind: "lifecycle_hook", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"model_id": "canonical", "model": "label", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}}, {Kind: "final_response", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"turn_id": "t"}}, {Kind: "explicit_feedback", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"text": "ok"}}}}
+	m, err := BuildMetadata(bundle, "m", now, now, SourceReference{Key: "sessions/cursor/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Models) != 1 || m.Models[0].Attributes["gen_ai.request.model"] != "canonical" || m.Models[0].ResponseModelStatus != "not_exposed" || *m.Counts.ExplicitFeedback != 1 {
+		t.Fatalf("%#v", m)
+	}
+	view, err := ParseNormalized(bundle)
+	if err != nil || view.HookFinals[0].Status != "matched_turn_id" {
+		t.Fatalf("%v %#v", err, view.HookFinals)
+	}
+}

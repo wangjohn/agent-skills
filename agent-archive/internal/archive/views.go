@@ -371,8 +371,23 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 					}
 				}
 			}
-			if (kind == "tool_use" || kind == "function_call") && strings.Contains(strings.ToLower(firstString(item, "path", "command", "arguments")), "skill.md") {
-				used["unknown\x00"] = SkillUse{Name: "unknown", Evidence: "skill_read_inference"}
+			path := firstString(item, "file_path", "path")
+			if input, ok := item["input"].(map[string]any); ok && path == "" {
+				path = firstString(input, "file_path", "path")
+			}
+			command := firstString(item, "command", "arguments")
+			readTool := strings.EqualFold(tool, "read") || strings.EqualFold(tool, "read_file")
+			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
+			if readTool || catRead {
+				if name := skillNameFromPath(path); name != "" {
+					used[name+"\x00"] = SkillUse{Name: name, Evidence: "skill_read_inference"}
+				} else if catRead {
+					for _, field := range []string{command} {
+						if name := skillNameFromPath(field); name != "" {
+							used[name+"\x00"] = SkillUse{Name: name, Evidence: "skill_read_inference"}
+						}
+					}
+				}
 			}
 			for _, child := range item {
 				walk(child)
@@ -401,6 +416,21 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 	sort.Slice(metadata.SkillsUsed, func(i, j int) bool {
 		return metadata.SkillsUsed[i].Name+"\x00"+metadata.SkillsUsed[i].SHA256 < metadata.SkillsUsed[j].Name+"\x00"+metadata.SkillsUsed[j].SHA256
 	})
+}
+
+func skillNameFromPath(value string) string {
+	value = strings.ReplaceAll(value, "\\", "/")
+	marker := "/SKILL.md"
+	index := strings.Index(value, marker)
+	if index < 1 {
+		return ""
+	}
+	before := strings.TrimSuffix(value[:index], "/")
+	parts := strings.Split(before, "/")
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return ""
+	}
+	return parts[len(parts)-1]
 }
 
 func countToolCalls(value any) int {
