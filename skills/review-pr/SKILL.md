@@ -41,7 +41,7 @@ Group related edits around the decision they implement rather than walking file 
 
 ## Build the review guide around the code
 
-Open with two or three short sentences. State what the PR changes and which decision needs the most attention. Then show the code. Do not start with an essay or a list of abstract design concerns.
+Open with two or three short sentences. State what the PR changes and which decision needs the most attention. Add the compact change map below, then show the code for the key decisions. Do not start with an essay or a list of abstract design concerns.
 
 Present the key decisions in priority order. Three or four are usually enough. Use fewer for a small PR. Add more only for separate decisions that matter. For each decision:
 
@@ -65,6 +65,27 @@ Separate facts from inference in plain words: “The PR description says…”; 
 Prefer the smallest change that resolves a material concern. Use known requirements to judge alternatives. Do not recommend abstractions or a broad redesign for imagined future needs. Say whether a decision needs an answer before merge or can wait, and explain why.
 
 End with a short coverage note and any unanswered decision not already clear above. If the PR is routine, say so and show the relevant behavior. Do not invent design concerns.
+
+## Give the reader a change map
+
+Always report the number of changed files, lines added, and lines removed. Use a compact line such as “12 files changed · +340 / −120 lines.” Get these counts from the same base and head used for the review. Use repository metadata or Git diff statistics, not estimates from selected excerpts. If only a partial diff is available, label the counts as partial or unavailable. Treat binary changes as files without inventing line counts. Include renamed files as reported by the diff.
+
+Follow the totals with a short table: **File or area | Files | + / − | Role in the change**. For a small PR, show each file. For a larger PR, group files by responsibility or feature, usually in three to six rows. Include every changed file in exactly one group so the counts add up. Keep generated files, lockfiles, and bulk mechanical changes visible in the totals; group them separately when they dominate the numbers.
+
+Use real paths and link to the main files in each area. Explain the role in a short phrase, such as “Accepts requests,” “Stores orders,” or “Tests address changes.” Show how the areas connect with one short flow or a small diagram when useful. A directory tree alone does not explain the code structure.
+
+Keep the map to roughly one screen and no more than about a fifth of the review. These are layout targets, not strict limits. Group rows before cutting code or decision analysis. The map is an index to the review, not the review itself.
+
+## Handle large PRs in layers
+
+Use this approach when a file-by-file map or one continuous explanation would be hard to follow. Judge size by the number of distinct changes and their relationships, not a fixed line threshold.
+
+1. Survey the full file list and diff statistics. Split the change into areas that the reader can understand separately. Do not select only the largest files or the first part of the diff.
+2. Inspect each area for decisions that affect behavior, contracts, or ownership. Follow links between areas, including unchanged consumers. Keep track of which areas received a detailed read, a survey only, or no inspection because access was limited.
+3. Deliver one compact map and the most important decisions with source excerpts. Group the remaining material decisions under short area headings in the same review. Give a suggested reading order when one area depends on another.
+4. Keep a complete file inventory in a linked diff or a separate appendix if needed. Keep essential evidence and decisions in the main review. Do not stop after the map or require another user request to complete the authorized review.
+
+Allow a longer review when several independent decisions need explanation. Keep each section short and easy to scan. Do not enforce a word budget by dropping a consequential area. State specific inspection gaps at the end; aggregate statistics do not establish that every file received a detailed review.
 
 ## Use diagrams to explain relationships
 
