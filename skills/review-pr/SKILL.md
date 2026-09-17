@@ -50,6 +50,10 @@ Present the key decisions in priority order. Three or four are usually enough. U
 3. **Explain the effect.** Use two to four short sentences below the code. Name the fields and functions involved. Explain the behavior and the main benefit or cost. Do not narrate each line.
 4. **State the decision.** Give a recommendation when the evidence supports one. Ask one specific question when human input is needed. Say which missing fact could change the recommendation. Do not force a question into every section.
 
+Name what each recommendation applies to and whether it accepts the PR's approach or proposes a change. Avoid “I recommend this design.” For example: “I recommend keeping the PR's choice to copy the address into `Order` at checkout.” For a proposed change: “I recommend changing the PR to copy the address at shipment instead.” Give the reason in a short sentence. Use these examples only when supported by the actual PR.
+
+Keep the scope of the recommendation explicit. Accepting one design choice does not mean approving the whole PR. If recommending approval from this review alone, say “I recommend approving the PR's design,” and state any unresolved conditions. Do not imply that this design review establishes correctness or that an approval has been submitted.
+
 Put a source link directly above each excerpt. Use the reviewed revision and verified lines. If no verified link is available, cite the supplied file path and symbol or diff hunk. Never invent URLs or line numbers.
 
 Keep source excerpts faithful. Preserve names, types, conditions, and error paths needed to understand the behavior. Mark omissions explicitly. Do not insert explanatory comments into quoted code or present rewritten code as source. Put notes outside the block. Label proposed code as a proposal and keep it separate from the current implementation.
