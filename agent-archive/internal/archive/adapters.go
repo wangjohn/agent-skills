@@ -140,13 +140,14 @@ func (CursorAdapter) FilterText(r io.Reader, freshStartedAt time.Time) (Filtered
 	return result, nil
 }
 
-var sensitiveValue = regexp.MustCompile(`(?i)(?:\b(?:api[_-]?key|access[_-]?key|secret|password|authorization|bearer|token)\b\s*[=:]\s*[^\s,;]+|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{12,}\b)`)
+var sensitiveValue = regexp.MustCompile(`(?i)(?:\bauthorization\b\s*:\s*bearer\s+[^\s,;]+|\b(?:api[_-]?key|access[_-]?key|secret|password|authorization|bearer|token)\b\s*[=:]\s*[^\s,;]+|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{12,}\b)`)
 
 var allowedKeys = map[string]bool{
 	"type": true, "id": true, "uuid": true, "session_id": true, "parent_id": true,
 	"parent_uuid": true, "parentuuid": true, "timestamp": true, "created_at": true, "updated_at": true,
 	"cwd": true, "model": true, "model_provider": true, "role": true, "content": true,
-	"text": true, "message": true, "item": true, "event": true, "payload": true,
+	"channel": true,
+	"text":    true, "message": true, "item": true, "event": true, "payload": true,
 	"tool_name": true, "tool_input": true, "tool_output": true, "tool_use": true,
 	"tool_result": true, "call_id": true, "input": true, "output": true, "result": true, "arguments": true,
 	"command": true, "path": true, "query": true, "url": true, "description": true,
@@ -247,6 +248,10 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
 		return nil, false
 	}
+	if channel, _ := in["channel"].(string); isHiddenChannel(channel) {
+		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
+		return nil, false
+	}
 	if kind, _ := in["type"].(string); isHiddenRole(kind) {
 		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
 		return nil, false
@@ -277,7 +282,23 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 		state.addGap("record_without_allowed_fields_omitted", state.record, "record omitted")
 		return nil, false
 	}
+	for _, key := range []string{"payload", "message", "item", "event"} {
+		if _, had := in[key]; had {
+			if _, kept := out[key]; !kept {
+				state.addGap("hidden_or_unknown_nested_content_omitted", state.record, "record omitted")
+				return nil, false
+			}
+		}
+	}
 	return out, true
+}
+
+func isHiddenChannel(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "analysis", "reasoning", "thinking", "chain_of_thought":
+		return true
+	}
+	return false
 }
 
 func sanitizeValue(value any, state *sanitizeState) (any, bool) {
@@ -314,7 +335,7 @@ func sanitizeValue(value any, state *sanitizeState) (any, bool) {
 
 func isHiddenRole(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "system", "developer", "reasoning", "analysis", "thinking", "chain_of_thought":
+	case "system", "developer", "reasoning", "analysis", "thinking", "chain_of_thought", "agent_reasoning", "agent_reasoning_delta", "raw_agent_reasoning":
 		return true
 	default:
 		return false

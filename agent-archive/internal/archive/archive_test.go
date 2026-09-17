@@ -34,7 +34,7 @@ func TestCodexAdapterFiltersPrivateFieldsAndUnknownRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := filtered.Boundary.RetainedRecords, 3; got != want {
+	if got, want := filtered.Boundary.RetainedRecords, 2; got != want {
 		t.Fatalf("retained records = %d, want %d", got, want)
 	}
 	joined := string(bytes.Join(filtered.Records, []byte("\n")))
@@ -288,5 +288,17 @@ func TestClaudeMultipleToolUseEntriesHaveResponseAttribution(t *testing.T) {
 	v, e := ParseNormalized(b)
 	if e != nil || len(v.ToolCalls) != 2 || v.Turns[0].ResponseModel != "claude-response" {
 		t.Fatalf("%v %#v", e, v)
+	}
+}
+
+func TestHiddenChannelAndBearerCredentialAreRemoved(t *testing.T) {
+	input := `{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":"hidden"}}` + "\n" + `{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"final","content":"Authorization: Bearer token-secret-value visible"}}`
+	f, e := (CodexAdapter{}).FilterJSONL(strings.NewReader(input))
+	if e != nil {
+		t.Fatal(e)
+	}
+	joined := string(bytes.Join(f.Records, []byte("\n")))
+	if strings.Contains(joined, "hidden") || strings.Contains(joined, "token-secret-value") || !strings.Contains(joined, "final") || !strings.Contains(joined, "[REDACTED]") {
+		t.Fatalf("%s", joined)
 	}
 }
