@@ -24,6 +24,7 @@ type Filter struct {
 	Harness, Model, Skill, SkillSHA256 string
 	From, To                           time.Time
 	RequireCompleteCoverage            bool
+	SkillUsage                         string
 }
 type Limits struct{ MaxCompressedBytes, MaxUncompressedBytes int }
 
@@ -87,7 +88,7 @@ func matches(m archive.Metadata, f Filter) bool {
 	if f.Model != "" {
 		found := false
 		for _, x := range m.Models {
-			if x.Attributes["gen_ai.request.model"] == f.Model {
+			if x.Attributes["gen_ai.request.model"] == f.Model || x.Attributes["gen_ai.response.model"] == f.Model {
 				found = true
 			}
 		}
@@ -96,13 +97,18 @@ func matches(m archive.Metadata, f Filter) bool {
 		}
 	}
 	if f.Skill != "" || f.SkillSHA256 != "" {
-		found := false
+		used, available := false, false
 		for _, x := range m.SkillsUsed {
 			if (f.Skill == "" || x.Name == f.Skill) && (f.SkillSHA256 == "" || x.SHA256 == f.SkillSHA256) {
-				found = true
+				used = true
 			}
 		}
-		if !found {
+		for _, x := range m.SkillsAvailable {
+			if (f.Skill == "" || x.Name == f.Skill) && (f.SkillSHA256 == "" || x.SHA256 == f.SkillSHA256) {
+				available = true
+			}
+		}
+		if (f.SkillUsage == "available" && !available) || (f.SkillUsage == "eligible_no_use" && (!available || used)) || (f.SkillUsage != "available" && f.SkillUsage != "eligible_no_use" && !used) {
 			return false
 		}
 	}
@@ -112,6 +118,9 @@ func matches(m archive.Metadata, f Filter) bool {
 // LoadSource verifies the compressed SHA-256 before bounded decompression and
 // validates that source identity matches the selected metadata pointer.
 func LoadSource(ctx context.Context, store storage.ObjectStore, metadata archive.Metadata, limits Limits) (archive.SourceBundle, error) {
+	if err := metadata.ValidateSourceReference(); err != nil {
+		return archive.SourceBundle{}, err
+	}
 	data, err := store.Get(ctx, metadata.SourceBundle.Key)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -121,6 +130,9 @@ func LoadSource(ctx context.Context, store storage.ObjectStore, metadata archive
 	}
 	if len(data) > limits.compressed() {
 		return archive.SourceBundle{}, errors.New("source exceeds compressed read limit")
+	}
+	if len(data) != metadata.SourceBundle.CompressedBytes {
+		return archive.SourceBundle{}, errors.New("source compressed size does not match metadata")
 	}
 	if !storage.VerifySHA256(data, metadata.SourceBundle.SHA256) {
 		return archive.SourceBundle{}, errors.New("source checksum mismatch")
@@ -141,7 +153,7 @@ func LoadSource(ctx context.Context, store storage.ObjectStore, metadata archive
 	if err := json.Unmarshal(plain, &bundle); err != nil {
 		return archive.SourceBundle{}, fmt.Errorf("decode source: %w", err)
 	}
-	if bundle.ArchiveSessionID != metadata.SessionID || bundle.NativeSessionID != metadata.NativeSessionID {
+	if bundle.SchemaVersion != archive.SourceSchemaVersion || bundle.ArchiveSessionID != metadata.SessionID || bundle.NativeSessionID != metadata.NativeSessionID || bundle.ProjectID != metadata.ProjectID || bundle.Capture.Harness != metadata.Harness || !bundle.Capture.CapturedAt.Equal(metadata.CapturedAt) || bundle.Capture.FilterVersion != metadata.FilterVersion {
 		return archive.SourceBundle{}, errors.New("source identity does not match metadata")
 	}
 	key, err := archive.SourceObjectKey(bundle, metadata.SourceBundle.SHA256)
