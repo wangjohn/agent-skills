@@ -108,7 +108,7 @@ func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFina
 					final.Status = "matched_message_id"
 					break
 				}
-				if final.TurnID != "" && final.TurnID == turn.TurnID {
+				if final.TurnID != "" && turn.Role == "assistant" && final.TurnID == turn.TurnID {
 					final.Status = "matched_turn_id"
 					break
 				}
@@ -280,11 +280,6 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: responseStatus}
 			models[key] = model
 		}
-		if model.TurnCount == nil {
-			zero := 0
-			model.TurnCount = &zero
-		}
-		*model.TurnCount++
 	}
 	metadata.Counts.Messages = &messages
 	if len(turnIDs) > 0 {
@@ -302,6 +297,13 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		metadata.Models = append(metadata.Models, *models[key])
 	}
 	deriveSkills(bundle, &metadata)
+	feedback := 0
+	for _, e := range bundle.SupplementalEvidence {
+		if e.Kind == "explicit_feedback" {
+			feedback++
+		}
+	}
+	metadata.Counts.ExplicitFeedback = &feedback
 	return metadata, nil
 }
 
@@ -335,6 +337,34 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			used[name+"\x00"+hash] = SkillUse{Name: name, SHA256: hash, Evidence: "skill_read_inference"}
 		}
 	}
+	var walk func(any)
+	walk = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			kind, _ := item["type"].(string)
+			tool := firstString(item, "name", "tool_name")
+			if kind == "tool_use" && strings.EqualFold(tool, "skill") {
+				if input, ok := item["input"].(map[string]any); ok {
+					if name := firstString(input, "skill", "name"); name != "" {
+						used[name+"\x00"] = SkillUse{Name: name, Evidence: "native_invocation"}
+					}
+				}
+			}
+			if (kind == "tool_use" || kind == "function_call") && strings.Contains(strings.ToLower(firstString(item, "path", "command", "arguments")), "skill.md") {
+				used["unknown\x00"] = SkillUse{Name: "unknown", Evidence: "skill_read_inference"}
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
+			}
+		}
+	}
+	for _, record := range bundle.NativeRecords {
+		walk(record)
+	}
 	for _, entry := range available {
 		metadata.SkillsAvailable = append(metadata.SkillsAvailable, entry)
 	}
@@ -344,8 +374,12 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 	if len(metadata.SkillsUsed) > 0 {
 		metadata.SkillDetection = "observed"
 	}
-	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool { return metadata.SkillsAvailable[i].Name < metadata.SkillsAvailable[j].Name })
-	sort.Slice(metadata.SkillsUsed, func(i, j int) bool { return metadata.SkillsUsed[i].Name < metadata.SkillsUsed[j].Name })
+	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool {
+		return metadata.SkillsAvailable[i].Name+"\x00"+metadata.SkillsAvailable[i].SHA256 < metadata.SkillsAvailable[j].Name+"\x00"+metadata.SkillsAvailable[j].SHA256
+	})
+	sort.Slice(metadata.SkillsUsed, func(i, j int) bool {
+		return metadata.SkillsUsed[i].Name+"\x00"+metadata.SkillsUsed[i].SHA256 < metadata.SkillsUsed[j].Name+"\x00"+metadata.SkillsUsed[j].SHA256
+	})
 }
 
 func countToolCalls(value any) int {

@@ -104,11 +104,30 @@ func (CursorAdapter) FilterText(r io.Reader, freshStartedAt time.Time) (Filtered
 	if len(content) > maxText {
 		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript exceeds safe size limit"}
 	}
-	result := FilteredTranscript{Format: "cursor-text", FirstEventAt: freshStartedAt.UTC(), Gaps: []CaptureGap{{Code: "text_structure_unavailable", Detail: "Cursor text retained without manufactured events"}, {Code: "hidden_instruction_detection_unavailable", Detail: "text format has no reliable role boundaries"}}}
+	result := FilteredTranscript{Format: "cursor-text", FirstEventAt: freshStartedAt.UTC(), Gaps: []CaptureGap{{Code: "text_structure_partial", Detail: "Cursor role sections retained without manufactured events"}}}
+	var retained []string
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "system:") || strings.HasPrefix(lower, "developer:") || strings.HasPrefix(lower, "thinking:") || strings.HasPrefix(lower, "analysis:") {
+			result.Gaps = append(result.Gaps, CaptureGap{Code: "hidden_instruction_omitted", Detail: "text section omitted"})
+			continue
+		}
+		if !(strings.HasPrefix(lower, "user:") || strings.HasPrefix(lower, "assistant:") || strings.HasPrefix(lower, "tool:")) {
+			return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has unrecognized role section"}
+		}
+		retained = append(retained, line)
+	}
+	if len(retained) == 0 {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable visible sections"}
+	}
 	state := sanitizeState{addGap: func(code string, _ int, detail string) {
 		result.Gaps = append(result.Gaps, CaptureGap{Code: code, Detail: detail})
 	}}
-	safe, keep := sanitizeValue(string(content), &state)
+	safe, keep := sanitizeValue(strings.Join(retained, "\n"), &state)
 	if !keep {
 		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable content"}
 	}
@@ -135,6 +154,7 @@ var allowedKeys = map[string]bool{
 	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
 	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
+	"skill": true,
 }
 
 var blockedKeys = map[string]bool{
