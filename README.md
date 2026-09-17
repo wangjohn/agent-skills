@@ -33,7 +33,7 @@ Each skill is a directory whose name matches the `name` field in `SKILL.md`. Kee
 
 Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This repo is the portable source of truth.
 
-`review-pr` prepares a human review guide to a PR's architecture, models, tradeoffs, and consequential design decisions, with selected code excerpts and focused review questions. Try: “Use review-pr to show me the decisions that deserve my attention in PR <url>.”
+`review-pr` prepares a human review guide to a PR's architecture, models, tradeoffs, and consequential design decisions, with code-first explanations, simple language, diagrams when useful, and focused review questions. Try: “Use review-pr to show me the decisions that deserve my attention in PR <url>.”
 
 ## Add a skill
 

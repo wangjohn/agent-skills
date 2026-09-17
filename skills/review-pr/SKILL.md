@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Prepare a prioritized human review guide for a pull request, highlighting architecture, structs and models, non-obvious choices, and consequential design decisions with selected code excerpts. Use when asked to review a PR for design or tradeoffs, or identify what deserves a human developer's attention. Not a substitute for a dedicated bug-finding review.
+description: Prepare a prioritized human review guide for a pull request, highlighting architecture, structs and models, non-obvious choices, and consequential design decisions with code-first explanations, simple language, and diagrams when useful. Use when asked to review a PR for design or tradeoffs, or identify what deserves a human developer's attention. Not a substitute for a dedicated bug-finding review.
 license: MIT
 ---
 
@@ -39,38 +39,60 @@ Include consequential choices even when the implementation looks sound. A human 
 
 Group related edits around the decision they implement rather than walking file by file. Omit routine plumbing, formatting, generated churn, and issues well served by automated review unless they expose a larger design choice. Do not invent alternatives or questions just to fill a quota.
 
-## Build the review guide
+## Build the review guide around the code
 
-Start with a brief explanation of the problem and the resulting behavior or architecture, including the main change from the existing approach. Add a small diagram only when it makes relationships easier to understand.
+Open with two or three short sentences. State what the PR changes and which decision needs the most attention. Then show the code. Do not start with an essay or a list of abstract design concerns.
 
-Then present the key decisions in priority order. Usually three or four are enough; use fewer for a small PR and more only when separate consequential decisions warrant them. For each decision, give the developer:
+Present the key decisions in priority order. Three or four are usually enough. Use fewer for a small PR. Add more only for separate decisions that matter. For each decision:
 
-1. **The decision and why it matters.** Use a specific title such as “A subscription owns billing state” rather than “Model changes.” Explain the practical consequence and which future changes become easier or harder.
-2. **The code to inspect.** Link to the exact relevant file and verified lines at the reviewed revision. If a verified link is unavailable, cite the supplied file path and symbol or diff hunk; never invent URLs or line numbers. Include a short, faithful excerpt of the definition or logic that carries the decision, with enough context to understand it. Mark omissions explicitly; do not pass paraphrased code off as source. Prefer a focused before/after when the change itself is the point. For a large model, show the consequential fields and link to the full definition.
-3. **The rationale and tradeoff.** Distinguish documented rationale, interpretation supported by code, and unknown intent. Reference the description or discussion when it supplies the rationale. Explain a plausible alternative only when it illuminates a real tradeoff in this repository; do not presume the author overlooked it.
-4. **The human judgment needed.** State your recommendation when the evidence supports one: accept the tradeoff, adjust the design, or resolve a specific unknown. Explain why, and what missing product or organizational context could change that assessment. Ask a concrete question only when human input is needed; identify the relevant owner when known. Do not ask the developer to rediscover facts you can establish from the code.
+1. **Name the change.** Use a concrete heading, such as “`Order` stores the address at checkout.” Add at most one sentence of context before the code.
+2. **Show the source.** Show the relevant struct, function, or diff. When needed, pair the definition with the code that writes or reads it. Arrange excerpts in execution order. Use before/after excerpts when they make the change easier to see.
+3. **Explain the effect.** Use two to four short sentences below the code. Name the fields and functions involved. Explain the behavior and the main benefit or cost. Do not narrate each line.
+4. **State the decision.** Give a recommendation when the evidence supports one. Ask one specific question when human input is needed. Say which missing fact could change the recommendation. Do not force a question into every section.
 
-For example, replace “Is this nullable field correct?” with “This model allows an order without a customer, and the importer creates that state. Should guest orders be a permanent domain concept, or should this remain an import-only transition? That choice affects what every downstream consumer must support.” Use examples only when supported by the actual PR.
+Put a source link directly above each excerpt. Use the reviewed revision and verified lines. If no verified link is available, cite the supplied file path and symbol or diff hunk. Never invent URLs or line numbers.
 
-Use answers in the PR discussion as evidence of intent, not proof that the design is appropriate. Do not repeat answered questions; if a concern remains, explain what the answer leaves unresolved or which evidence contradicts it. Distinguish decisions needing resolution before merge from accepted tradeoffs, choices worth understanding, and work that can reasonably follow later. Explain any claimed need to block the change.
+Keep source excerpts faithful. Preserve names, types, conditions, and error paths needed to understand the behavior. Mark omissions explicitly. Do not insert explanatory comments into quoted code or present rewritten code as source. Put notes outside the block. Label proposed code as a proposal and keep it separate from the current implementation.
 
-Scale recommendations to the problem and constraints. Prefer the smallest change that addresses a material concern; include using the existing mechanism or deferring an abstraction as alternatives when realistic. Do not equate more abstraction, extensibility, or consistency with better design, and do not recommend a broad redesign without evidence that its benefit warrants the cost.
+Show enough code to follow the choice without opening another file. Link to the full implementation for extra detail. Avoid disconnected fragments that require the reader to reconstruct the flow. Do not paste whole files or unrelated helpers to increase the amount of code.
 
-Finish with any unresolved decisions and a concise coverage note: what you inspected and any material gaps. If the PR is routine, say so and give a short guide to its relevant behavior instead of manufacturing architectural concerns.
+Separate facts from inference in plain words: “The PR description says…”; “This code does…”; “The reason is not stated.” Treat author explanations as evidence of intent. If a concern remains, explain what the answer does not resolve. Do not repeat questions already answered in the discussion.
+
+Prefer the smallest change that resolves a material concern. Use known requirements to judge alternatives. Do not recommend abstractions or a broad redesign for imagined future needs. Say whether a decision needs an answer before merge or can wait, and explain why.
+
+End with a short coverage note and any unanswered decision not already clear above. If the PR is routine, say so and show the relevant behavior. Do not invent design concerns.
+
+## Use diagrams to explain relationships
+
+Add a diagram when code excerpts alone make a relationship hard to follow. Useful cases include calls across several components, data ownership, asynchronous work, and state changes. A simple field addition does not need a diagram.
+
+Use a small Mermaid flowchart, sequence diagram, or state diagram. Use a plain-text diagram if the output cannot render Mermaid. Put it next to the code it explains. Keep it focused on one concept, usually three to seven nodes. Label nodes with actual symbols or component names. Label arrows with actions, data, or conditions.
+
+Build the diagram from inspected code. Show direction and distinguish a queued message from a direct call when that distinction matters. Label before and after states separately. Mark any inferred relationship. A diagram supplements source excerpts; it does not replace them or prove behavior that was not inspected.
+
+## Use simple technical English
+
+Use wording inspired by [ASD-STE100](https://asd-ste100.org/STE_faq.html). Exact compliance with its dictionary is not required. Do not claim compliance. Apply these rules to the review text, not to quoted source code:
+
+- Use short sentences with one main idea. Aim for 10–20 words when practical. Keep paragraphs to two or three sentences.
+- Use active voice and name the actor: “`saveOrder` copies the address,” rather than “The address is persisted.”
+- Use familiar verbs such as “read,” “write,” “copy,” “call,” and “send.” Avoid abstract wording such as “introduces a persistence boundary.”
+- Use the same word for the same thing. Preserve exact code identifiers. Define an unfamiliar domain term or acronym once.
+- State conditions and effects directly: “If the customer edits the address, the order keeps the old address.”
+- Keep subjects explicit. Replace vague references such as “this mechanism” with the function, field, or component name.
+- Keep complete sentences. Do not remove useful context, articles, or conditions just to make the text shorter.
+
+For example, replace “Snapshot semantics decouple historical fulfillment data from mutable customer state” with “`Order` keeps a copy of the address. Later customer edits do not change that copy.” Use such claims only when the inspected code supports them.
 
 ## Budget the reader's attention
 
-Use these editorial targets for prose, excluding code excerpts. Scale by the number and consequence of decisions, not lines changed; follow an explicit user preference for depth.
+Make source code the largest part of the review body. Aim for roughly twice as much displayed code as explanatory text. This is a visual target, not a word-count test. Do not count diagrams as source code, pad excerpts, or omit a needed explanation to meet the target.
 
-- **Small or routine PR:** about 200–400 words, with zero to two key decisions.
-- **Typical PR:** about 600–900 words, with three or four key decisions.
-- **Several consequential decisions:** about 900–1,400 words, usually with four to six key decisions. Exceed this only when compressing further would hide material evidence or a decision the reviewer needs to make.
+For a typical PR, aim for about 200–450 words of prose across three or four decisions. For each decision, usually show one to three focused excerpts and use about 30–70 words of explanation. An excerpt can contain 10–30 lines, or more when the complete definition or flow needs them. Short changes need less code and less text.
 
-Make the opening independently useful in roughly 80–120 words for a typical PR: explain the change, identify the most consequential choice, and say where human input is needed. Aim for roughly 120–180 words of prose per decision, with one focused excerpt, usually 5–15 lines. These are flexible budgets, not quotas; preserve enough code to interpret the decision correctly. Combine related evidence and link to full definitions instead of reproducing long implementations.
+For a routine PR, use fewer than 200 words when enough. For several complex decisions, about 450–700 words of prose may be needed. These are flexible targets, not minimums or hard limits. Follow the user's requested depth. Keep all material decisions and essential evidence visible.
 
-Give each decision a descriptive title and put its consequence or recommendation first so the developer can scan before reading closely. The four elements above are content requirements, not four mandatory subheadings. Allocate more space to decisions with greater consequences or uncertainty. Avoid repeating the same rationale in the opening, decision sections, and closing.
-
-When the guide grows, remove repetition and low-value observations first. Move optional supporting detail behind source links or into a clearly separated deeper-reading section only when needed. Keep every material decision, essential evidence, and unresolved blocker in the main guide; do not make the user request a second pass to learn about them. Concise output must not reduce inspection coverage.
+Before delivery, check that the reader can follow each choice from the shown code and nearby explanation. Replace dense prose with a relevant excerpt or diagram where useful. Remove repeated conclusions and details that do not help the decision. Shorter output must not reduce inspection coverage.
 
 ## Keep the focus
 
