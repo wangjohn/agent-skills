@@ -30,6 +30,6 @@
   "$defs": {
     "harness": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "mode": {"type": "string"}}},
     "versioned": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}}},
-    "skill": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "sha256": {"type": "string"}}}
+    "skill": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "sha256": {"type": "string"}, "coverage":{"type":"string"}}}
   }
 }

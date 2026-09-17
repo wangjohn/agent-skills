@@ -45,6 +45,15 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 		}
 		records = append(records, record)
 	}
+	nativeText := make([]TextTranscript, 0, len(transcript.Text))
+	for _, text := range transcript.Text {
+		if text != "" {
+			nativeText = append(nativeText, TextTranscript{Format: transcript.Format, Content: text})
+		}
+	}
+	if len(records) == 0 && len(nativeText) == 0 {
+		return SourceBundle{}, errors.New("filtered transcript has no retained evidence")
+	}
 	harness := observedHarness(reg.Harness, records)
 	filteredSupplemental, gaps, err := FilterSupplementalEvidence(supplemental)
 	if err != nil {
@@ -61,7 +70,7 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 			SourceFormat: transcript.Format, Boundary: transcript.Boundary,
 			FilterVersion: FilterVersion, CapturedAt: capturedAt.UTC(), Gaps: allGaps,
 		},
-		NativeRecords: records, SupplementalEvidence: filteredSupplemental,
+		NativeRecords: records, NativeText: nativeText, SupplementalEvidence: filteredSupplemental,
 	}, nil
 }
 

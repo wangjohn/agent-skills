@@ -89,6 +89,38 @@ func (CursorAdapter) FilterJSONL(r io.Reader) (FilteredTranscript, error) {
 	})
 }
 
+// FilterText retains a hook-provided Cursor text transcript only when the hook
+// has established that this is a fresh eligible session. It labels the source
+// as text rather than fabricating message events from unstructured content.
+func (CursorAdapter) FilterText(r io.Reader, freshStartedAt time.Time) (FilteredTranscript, error) {
+	if freshStartedAt.IsZero() {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no reliable fresh-session start"}
+	}
+	const maxText = 2 * 1024 * 1024
+	content, err := io.ReadAll(io.LimitReader(r, maxText+1))
+	if err != nil {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript cannot be read"}
+	}
+	if len(content) > maxText {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript exceeds safe size limit"}
+	}
+	result := FilteredTranscript{Format: "cursor-text", FirstEventAt: freshStartedAt.UTC(), Gaps: []CaptureGap{{Code: "text_structure_unavailable", Detail: "Cursor text retained without manufactured events"}, {Code: "hidden_instruction_detection_unavailable", Detail: "text format has no reliable role boundaries"}}}
+	state := sanitizeState{addGap: func(code string, _ int, detail string) {
+		result.Gaps = append(result.Gaps, CaptureGap{Code: code, Detail: detail})
+	}}
+	safe, keep := sanitizeValue(string(content), &state)
+	if !keep {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable content"}
+	}
+	text, ok := safe.(string)
+	if !ok {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript is not text"}
+	}
+	result.Text = []string{text}
+	result.Boundary.RetainedBytes = len(text)
+	return result, nil
+}
+
 var sensitiveValue = regexp.MustCompile(`(?i)(?:\b(?:api[_-]?key|access[_-]?key|secret|password|authorization|bearer|token)\b\s*[=:]\s*[^\s,;]+|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{12,}\b)`)
 
 var allowedKeys = map[string]bool{

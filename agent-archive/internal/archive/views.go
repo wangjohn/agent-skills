@@ -17,8 +17,9 @@ func (e *ParseError) Error() string { return "metadata parse failed: " + e.Reaso
 // NormalizedView is an in-memory analysis aid. It must never be uploaded as a
 // second transcript representation.
 type NormalizedView struct {
-	Turns     []NormalizedTurn
-	ToolCalls []NormalizedToolCall
+	Turns      []NormalizedTurn
+	ToolCalls  []NormalizedToolCall
+	HookFinals []HookFinalReconciliation
 }
 
 type NormalizedTurn struct {
@@ -32,7 +33,18 @@ type NormalizedTurn struct {
 	Reasoning     string `json:"reasoning_level,omitempty"`
 	ID            string `json:"id,omitempty"`
 	ParentID      string `json:"parent_id,omitempty"`
+	TurnID        string `json:"turn_id,omitempty"`
 	Timestamp     string `json:"timestamp,omitempty"`
+}
+
+// HookFinalReconciliation keeps hook-only finals separate from native source.
+// It never uses identical text as a deduplication signal.
+type HookFinalReconciliation struct {
+	EvidenceIndex int    `json:"evidence_index"`
+	Status        string `json:"status"`
+	MessageID     string `json:"message_id,omitempty"`
+	TurnID        string `json:"turn_id,omitempty"`
+	AgentID       string `json:"agent_id,omitempty"`
 }
 
 type NormalizedToolCall struct {
@@ -67,7 +79,7 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		if isHiddenRole(role) {
 			return NormalizedView{}, &ParseError{Reason: "hidden role present in filtered source"}
 		}
-		turn := NormalizedTurn{RecordIndex: i, Role: role, Text: text, Provider: firstStringDeep(record, "model_provider"), ID: firstStringDeep(record, "id", "uuid"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Timestamp: firstStringDeep(record, "timestamp", "created_at")}
+		turn := NormalizedTurn{RecordIndex: i, Role: role, Text: text, Provider: firstStringDeep(record, "model_provider"), ID: firstStringDeep(record, "id", "uuid"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), TurnID: firstStringDeep(record, "turn_id"), Timestamp: firstStringDeep(record, "timestamp", "created_at")}
 		if bundle.Capture.Harness.Name == "codex" {
 			turn.Model, turn.Reasoning, turn.ModelSource = codexModel, codexReasoning, "turn_context"
 		} else if bundle.Capture.Harness.Name == "claude" {
@@ -77,7 +89,34 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		}
 		view.Turns = append(view.Turns, turn)
 	}
+	view.HookFinals = reconcileHookFinals(bundle, view.Turns)
 	return view, nil
+}
+
+func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFinalReconciliation {
+	var out []HookFinalReconciliation
+	for index, evidence := range bundle.SupplementalEvidence {
+		if evidence.Kind != "final_response" {
+			continue
+		}
+		final := HookFinalReconciliation{EvidenceIndex: index, MessageID: firstString(evidence.Payload, "message_id"), TurnID: firstString(evidence.Payload, "turn_id"), AgentID: firstString(evidence.Payload, "agent_id"), Status: "unreconciled_identity"}
+		if final.AgentID != "" {
+			final.Status = "separate_subagent"
+		} else {
+			for _, turn := range turns {
+				if final.MessageID != "" && final.MessageID == turn.ID {
+					final.Status = "matched_message_id"
+					break
+				}
+				if final.TurnID != "" && final.TurnID == turn.TurnID {
+					final.Status = "matched_turn_id"
+					break
+				}
+			}
+		}
+		out = append(out, final)
+	}
+	return out
 }
 
 func toolCall(record map[string]any, index int, model, reasoning string) (NormalizedToolCall, bool) {
@@ -90,6 +129,17 @@ func toolCall(record map[string]any, index int, model, reasoning string) (Normal
 			if n, ok := v[key].(map[string]any); ok {
 				if hit := find(n); hit != nil {
 					return hit
+				}
+			}
+		}
+		for _, value := range v {
+			if items, ok := value.([]any); ok {
+				for _, item := range items {
+					if nested, ok := item.(map[string]any); ok {
+						if hit := find(nested); hit != nil {
+							return hit
+						}
+					}
 				}
 			}
 		}
@@ -210,20 +260,24 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		if turn.Role == "user" && turn.ID != "" {
 			turnIDs[turn.ID] = true
 		}
-		if turn.Model == "" {
+		modelName, attribute, responseStatus := turn.Model, "gen_ai.request.model", "not_exposed"
+		if modelName == "" && turn.ResponseModel != "" {
+			modelName, attribute, responseStatus = turn.ResponseModel, "gen_ai.response.model", "observed"
+		}
+		if modelName == "" {
 			continue
 		}
-		key := turn.Provider + "\x00" + turn.Model + "\x00" + turn.Reasoning
+		key := attribute + "\x00" + turn.Provider + "\x00" + modelName + "\x00" + turn.Reasoning
 		model := models[key]
 		if model == nil {
-			attributes := map[string]string{"gen_ai.request.model": turn.Model}
+			attributes := map[string]string{attribute: modelName}
 			if turn.Provider != "" {
 				attributes["gen_ai.provider.name"] = turn.Provider
 			}
 			if turn.Reasoning != "" {
 				attributes["gen_ai.request.reasoning.level"] = turn.Reasoning
 			}
-			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: "not_exposed"}
+			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: responseStatus}
 			models[key] = model
 		}
 		if model.TurnCount == nil {

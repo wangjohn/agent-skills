@@ -111,6 +111,7 @@ type FilteredTranscript struct {
 	Boundary     CaptureBoundary `json:"boundary"`
 	Gaps         []CaptureGap    `json:"gaps,omitempty"`
 	FirstEventAt time.Time       `json:"-"`
+	Text         []string        `json:"-"`
 }
 
 // SupplementalEvidence is hook-only evidence. Payload must already be
@@ -144,7 +145,15 @@ type SourceBundle struct {
 	ProjectID            string                 `json:"project_id"`
 	Capture              SourceCapture          `json:"capture"`
 	NativeRecords        []map[string]any       `json:"native_records"`
+	NativeText           []TextTranscript       `json:"native_text,omitempty"`
 	SupplementalEvidence []SupplementalEvidence `json:"supplemental_evidence,omitempty"`
+}
+
+// TextTranscript preserves a safely filtered native text transcript without
+// inventing JSONL records or universal message events.
+type TextTranscript struct {
+	Format  string `json:"format"`
+	Content string `json:"content"`
 }
 
 // SourceReference is the content-addressed pointer carried by metadata.
