@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wangjohn/agent-skills/agent-archive/schemas/metadata.schema.json",
+  "title": "Agent Archive metadata sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "session_id", "native_session_id", "machine_id", "project_id", "started_at", "captured_at", "metadata_derived_at", "harness", "adapter", "parser", "filter_version", "state", "skill_detection", "counts", "source_bundle"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "native_session_id": {"type": "string", "minLength": 1},
+    "machine_id": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "metadata_derived_at": {"type": "string", "format": "date-time"},
+    "harness": {"$ref": "#/$defs/harness"},
+    "adapter": {"$ref": "#/$defs/versioned"},
+    "parser": {"type": "object", "additionalProperties": false, "required": ["name", "version", "status"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "status": {"enum": ["partial", "failed", "complete"]}}},
+    "filter_version": {"type": "string"},
+    "state": {"enum": ["active", "idle", "closed", "unknown"]},
+    "models": {"type": "array", "items": {"type": "object"}},
+    "skills_available": {"type": "array", "items": {"$ref": "#/$defs/skill"}},
+    "skills_used": {"type": "array", "items": {"type": "object"}},
+    "skill_detection": {"enum": ["observed_none", "partial", "unavailable", "observed"]},
+    "counts": {"type": "object"},
+    "capture_gaps": {"type": "array", "items": {"type": "object"}},
+    "source_bundle": {"type": "object", "additionalProperties": false, "required": ["key", "sha256", "compressed_bytes"], "properties": {"key": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "compressed_bytes": {"type": "integer", "minimum": 0}}}
+  },
+  "$defs": {
+    "harness": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "mode": {"type": "string"}}},
+    "versioned": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}}},
+    "skill": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "sha256": {"type": "string"}}}
+  }
+}
