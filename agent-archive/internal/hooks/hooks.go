@@ -27,11 +27,11 @@ func Merge(existing []byte, harness, executable string) ([]byte, error) {
 	var events []string
 	switch harness {
 	case "codex":
-		events = []string{"SessionStart", "Stop", "Interrupt", "SessionEnd", "SubagentStop"}
+		events = []string{"SessionStart", "UserPromptSubmit", "Stop", "Interrupt", "SessionEnd", "SubagentStop"}
 	case "claude":
-		events = []string{"SessionStart", "Stop", "StopFailure", "SessionEnd", "SubagentStop"}
+		events = []string{"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd", "SubagentStop"}
 	case "cursor":
-		events = []string{"sessionStart", "stop", "sessionEnd", "subagentStop"}
+		events = []string{"sessionStart", "beforeSubmitPrompt", "stop", "sessionEnd", "subagentStop"}
 		if v, ok := root["version"]; ok && v != float64(1) {
 			return nil, errors.New("unsupported Cursor hook configuration version")
 		}
