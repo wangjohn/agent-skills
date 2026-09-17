@@ -69,9 +69,7 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 			codexModel, codexReasoning = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort")
 			continue
 		}
-		if call, ok := toolCall(record, i, codexModel, codexReasoning); ok {
-			view.ToolCalls = append(view.ToolCalls, call)
-		}
+		view.ToolCalls = append(view.ToolCalls, toolCalls(record, i, codexModel, codexReasoning)...)
 		role, text, ok := findVisibleMessage(record)
 		if !ok {
 			continue
@@ -119,37 +117,27 @@ func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFina
 	return out
 }
 
-func toolCall(record map[string]any, index int, model, reasoning string) (NormalizedToolCall, bool) {
-	var find func(map[string]any) map[string]any
-	find = func(v map[string]any) map[string]any {
-		if kind, _ := v["type"].(string); kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
-			return v
-		}
-		for _, key := range []string{"payload", "message", "item", "event"} {
-			if n, ok := v[key].(map[string]any); ok {
-				if hit := find(n); hit != nil {
-					return hit
-				}
+func toolCalls(record map[string]any, index int, model, reasoning string) []NormalizedToolCall {
+	var out []NormalizedToolCall
+	var walk func(any)
+	walk = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			kind, _ := item["type"].(string)
+			if kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
+				out = append(out, NormalizedToolCall{RecordIndex: index, CallID: firstString(item, "call_id", "id"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Model: model, Reasoning: reasoning})
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
 			}
 		}
-		for _, value := range v {
-			if items, ok := value.([]any); ok {
-				for _, item := range items {
-					if nested, ok := item.(map[string]any); ok {
-						if hit := find(nested); hit != nil {
-							return hit
-						}
-					}
-				}
-			}
-		}
-		return nil
 	}
-	hit := find(record)
-	if hit == nil {
-		return NormalizedToolCall{}, false
-	}
-	return NormalizedToolCall{RecordIndex: index, CallID: firstString(hit, "call_id", "id"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Model: model, Reasoning: reasoning}, true
+	walk(record)
+	return out
 }
 
 func findVisibleMessage(record map[string]any) (string, string, bool) {
@@ -296,6 +284,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 	for _, key := range modelKeys {
 		metadata.Models = append(metadata.Models, *models[key])
 	}
+	deriveHookModels(bundle, &metadata)
 	deriveSkills(bundle, &metadata)
 	feedback := 0
 	for _, e := range bundle.SupplementalEvidence {
@@ -305,6 +294,38 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 	}
 	metadata.Counts.ExplicitFeedback = &feedback
 	return metadata, nil
+}
+
+func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
+	seen := map[string]bool{}
+	for _, evidence := range bundle.SupplementalEvidence {
+		if evidence.Kind != "lifecycle_hook" && evidence.Kind != "final_response" {
+			continue
+		}
+		id, label := firstString(evidence.Payload, "model_id"), firstString(evidence.Payload, "model")
+		if id == "" {
+			continue
+		}
+		key := id + "\x00" + label
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		attrs := map[string]string{"gen_ai.request.model": id}
+		if label != "" {
+			attrs["gen_ai.request.model.label"] = label
+		}
+		if params, ok := evidence.Payload["model_params"].([]any); ok {
+			for _, raw := range params {
+				if p, ok := raw.(map[string]any); ok {
+					if name, value := firstString(p, "id"), firstString(p, "value"); name != "" {
+						attrs["gen_ai.request.setting."+name] = value
+					}
+				}
+			}
+		}
+		metadata.Models = append(metadata.Models, ModelSummary{Attributes: attrs, Source: "hook", ResponseModelStatus: "not_exposed"})
+	}
 }
 
 func deriveSkills(bundle SourceBundle, metadata *Metadata) {

@@ -197,7 +197,8 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 			result.FirstEventAt = parseNativeTimestamp(raw)
 		}
 		kind, _ := raw["type"].(string)
-		if !knownTypes[kind] {
+		cursorRoleContent := format == "cursor-jsonl" && kind == "" && firstString(raw, "role") != ""
+		if !knownTypes[kind] && !cursorRoleContent {
 			addGap("unknown_record_type", lineNo, "record omitted")
 			continue
 		}

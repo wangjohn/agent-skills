@@ -106,9 +106,13 @@ func matches(m archive.Metadata, f Filter) bool {
 		for _, x := range m.SkillsAvailable {
 			if (f.Skill == "" || x.Name == f.Skill) && (f.SkillSHA256 == "" || x.SHA256 == f.SkillSHA256) {
 				available = true
+				if x.Coverage != "eligible" && x.Coverage != "discovered" {
+					available = false
+				}
 			}
 		}
-		if (f.SkillUsage == "available" && !available) || (f.SkillUsage == "eligible_no_use" && (!available || used)) || (f.SkillUsage != "available" && f.SkillUsage != "eligible_no_use" && !used) {
+		eligibleNoUse := available && used == false && m.SkillDetection == "observed_none"
+		if (f.SkillUsage == "available" && !available) || (f.SkillUsage == "eligible_no_use" && !eligibleNoUse) || (f.SkillUsage != "available" && f.SkillUsage != "eligible_no_use" && !used) {
 			return false
 		}
 	}
