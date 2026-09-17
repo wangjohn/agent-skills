@@ -15,9 +15,9 @@ static CFStringRef aa_string(const char *value) {
 
 static int aa_keychain_get(const char *service, const char *account, void **out, size_t *out_len) {
 	CFStringRef svc = aa_string(service), acct = aa_string(account);
-	const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData };
-	const void *values[] = { kSecClassGenericPassword, svc, acct, kCFBooleanTrue };
-	CFDictionaryRef query = CFDictionaryCreate(NULL, keys, values, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData, kSecUseAuthenticationUI };
+	const void *values[] = { kSecClassGenericPassword, svc, acct, kCFBooleanTrue, kSecUseAuthenticationUIFail };
+	CFDictionaryRef query = CFDictionaryCreate(NULL, keys, values, 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	CFTypeRef result = NULL;
 	OSStatus status = SecItemCopyMatching(query, &result);
 	CFRelease(query); CFRelease(svc); CFRelease(acct);
@@ -39,8 +39,8 @@ static int aa_keychain_save(const char *service, const char *account, const void
 	const void *values[] = { kSecClassGenericPassword, svc, acct, data };
 	CFDictionaryRef item = CFDictionaryCreate(NULL, keys, values, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	OSStatus status = SecItemAdd(item, NULL);
-	CFRelease(item); CFRelease(data);
-	if (status != errSecDuplicateItem) { CFRelease(svc); CFRelease(acct); return (int)status; }
+	CFRelease(item);
+	if (status != errSecDuplicateItem) { CFRelease(data); CFRelease(svc); CFRelease(acct); return (int)status; }
 	const void *queryKeys[] = { kSecClass, kSecAttrService, kSecAttrAccount };
 	const void *queryValues[] = { kSecClassGenericPassword, svc, acct };
 	CFDictionaryRef query = CFDictionaryCreate(NULL, queryKeys, queryValues, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -48,7 +48,7 @@ static int aa_keychain_save(const char *service, const char *account, const void
 	const void *changeValues[] = { data };
 	CFDictionaryRef changes = CFDictionaryCreate(NULL, changeKeys, changeValues, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	status = SecItemUpdate(query, changes);
-	CFRelease(changes); CFRelease(query); CFRelease(svc); CFRelease(acct);
+	CFRelease(changes); CFRelease(query); CFRelease(data); CFRelease(svc); CFRelease(acct);
 	return (int)status;
 }
 
