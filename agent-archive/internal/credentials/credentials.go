@@ -124,7 +124,7 @@ func R2Endpoint(endpoint, accountID string) (string, error) {
 		endpoint = "https://" + accountID + ".r2.cloudflarestorage.com"
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" && u.Path != "/" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("invalid R2 endpoint")
 	}
 	return strings.TrimRight(endpoint, "/"), nil
