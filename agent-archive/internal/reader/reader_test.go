@@ -82,3 +82,19 @@ func TestRefreshRequiredForDeletedSource(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestEligibleNoUseRequiresObservedEligibility(t *testing.T) {
+	f := Filter{Skill: "review", SkillUsage: "eligible_no_use"}
+	m := archive.Metadata{SkillDetection: "observed_none", SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: "installed_only"}}}
+	if matches(m, f) {
+		t.Fatal("installed_only treated as eligible")
+	}
+	m.SkillsAvailable[0].Coverage = "eligible"
+	if !matches(m, f) {
+		t.Fatal("eligible observed-none excluded")
+	}
+	m.SkillDetection = "unavailable"
+	if matches(m, f) {
+		t.Fatal("unknown detection treated as no use")
+	}
+}

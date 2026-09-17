@@ -262,3 +262,31 @@ func TestHookModelAndAssistantOnlyFinalReconciliation(t *testing.T) {
 		t.Fatalf("%v %#v", err, view.HookFinals)
 	}
 }
+
+func TestSameNameDifferentHashInventoryMetadataIsDeterministic(t *testing.T) {
+	now := time.Now()
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_inventory", ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "installed_only", "skills": []any{map[string]any{"name": "same", "sha256": "bbb"}, map[string]any{"name": "same", "sha256": "aaa"}}}}}}
+	ref := SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
+	one, e := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	two, e := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	x, _ := json.Marshal(one)
+	y, _ := json.Marshal(two)
+	if !bytes.Equal(x, y) || one.SkillsAvailable[0].SHA256 != "aaa" {
+		t.Fatalf("%s %s", x, y)
+	}
+}
+
+func TestClaudeMultipleToolUseEntriesHaveResponseAttribution(t *testing.T) {
+	now := time.Now()
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"type": "assistant", "model": "claude-response", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "x"}, map[string]any{"type": "tool_use", "id": "one"}, map[string]any{"type": "tool_use", "id": "two"}}}}}}
+	v, e := ParseNormalized(b)
+	if e != nil || len(v.ToolCalls) != 2 || v.Turns[0].ResponseModel != "claude-response" {
+		t.Fatalf("%v %#v", e, v)
+	}
+}
