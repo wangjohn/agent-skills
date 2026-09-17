@@ -49,3 +49,7 @@ Or tell an agent to follow the `create-skill` skill in this repo.
 ```bash
 python3 scripts/validate.py
 ```
+
+## Private agent-run archive
+
+The proposed [product and engineering specification](docs/agent-run-archive-spec.md) covers the `agent-archive` CLI, onboarding for private R2 and S3 storage, Codex/Claude Code/Cursor capture, metadata, privacy, recovery, and rollout. This is a plan, not an implemented release.
