@@ -1,0 +1,141 @@
+package hooks
+
+import (
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Change is prepared before any mutation so callers can show a concrete plan.
+type Change struct {
+	Path    string
+	Before  []byte
+	After   []byte
+	Existed bool
+	Mode    os.FileMode
+}
+
+func Plan(home, executable string, harnesses []string) ([]Change, error) {
+	changes := []Change{}
+	for _, h := range harnesses {
+		relative := ""
+		switch h {
+		case "codex":
+			relative = ".codex/hooks.json"
+		case "claude":
+			relative = ".claude/settings.json"
+		case "cursor":
+			relative = ".cursor/hooks.json"
+		default:
+			return nil, errors.New("unsupported harness")
+		}
+		path := filepath.Join(home, relative)
+		before, err := os.ReadFile(path)
+		exists := err == nil
+		if err != nil && !os.IsNotExist(err) {
+			return nil, errors.New("cannot read existing hook configuration")
+		}
+		after, err := Merge(before, h, executable)
+		if err != nil {
+			return nil, err
+		}
+		mode := os.FileMode(0600)
+		if exists {
+			info, e := os.Stat(path)
+			if e != nil {
+				return nil, e
+			}
+			mode = info.Mode().Perm()
+		}
+		changes = append(changes, Change{path, before, after, exists, mode})
+	}
+	return changes, nil
+}
+
+// Apply rolls back already written files on failure. It refuses a configuration
+// changed since the plan was prepared, rather than overwriting concurrent edits.
+func Apply(changes []Change) error {
+	applied := []Change{}
+	for _, c := range changes {
+		current, err := os.ReadFile(c.Path)
+		exists := err == nil
+		if (err != nil && !os.IsNotExist(err)) || exists != c.Existed || string(current) != string(c.Before) {
+			return errors.Join(errors.New("hook configuration changed during setup; retry setup"), rollback(applied))
+		}
+		if err = atomicWrite(c.Path, c.After, c.Mode); err != nil {
+			return errors.Join(errors.New("cannot install hooks"), rollback(applied))
+		}
+		applied = append(applied, c)
+	}
+	return nil
+}
+func Rollback(changes []Change) error { return rollback(changes) }
+func rollback(changes []Change) error {
+	var failures []error
+	for i := len(changes) - 1; i >= 0; i-- {
+		c := changes[i]
+		current, e := os.ReadFile(c.Path)
+		if e != nil || string(current) != string(c.After) {
+			failures = append(failures, errors.New("hook configuration changed; manual recovery required"))
+			continue
+		}
+		if c.Existed {
+			e = atomicWrite(c.Path, c.Before, c.Mode)
+		} else {
+			e = os.Remove(c.Path)
+		}
+		if e != nil {
+			failures = append(failures, e)
+		}
+	}
+	return errors.Join(failures...)
+}
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".archive-")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(mode); err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(name, path)
+}
+
+const LaunchLabel = "com.agent-archive.collector"
+
+func LaunchAgent(executable, dataHome string) ([]byte, error) {
+	if !filepath.IsAbs(executable) || !filepath.IsAbs(dataHome) {
+		return nil, errors.New("LaunchAgent paths must be absolute")
+	}
+	escape := func(s string) string { var b strings.Builder; xml.EscapeText(&b, []byte(s)); return b.String() }
+	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>%s</string>
+<key>ProgramArguments</key><array><string>%s</string><string>_collect</string></array>
+<key>EnvironmentVariables</key><dict><key>AGENT_ARCHIVE_HOME</key><string>%s</string></dict>
+<key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>%s</string>
+<key>StandardErrorPath</key><string>%s</string>
+</dict></plist>
+`, LaunchLabel, escape(executable), escape(dataHome), escape(filepath.Join(dataHome, "collector.log")), escape(filepath.Join(dataHome, "collector-error.log")))), nil
+}
