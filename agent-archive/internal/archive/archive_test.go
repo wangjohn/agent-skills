@@ -247,6 +247,43 @@ func TestPreciseNativeSkillReadInference(t *testing.T) {
 	}
 }
 
+func TestEligibleSkillNotUsedMarksObservedNone(t *testing.T) {
+	now := time.Now()
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_inventory", ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "eligible", "skills": []any{map[string]any{"name": "review", "sha256": "aaa"}}}}}}
+	ref := SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
+	m, err := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.SkillDetection != "observed_none" {
+		t.Fatalf("SkillDetection=%q, want observed_none", m.SkillDetection)
+	}
+}
+
+func TestModelSummaryTracksTurnCount(t *testing.T) {
+	now := time.Now()
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{
+		{"role": "assistant", "model": "gpt-x", "content": "one"},
+		{"role": "assistant", "model": "gpt-x", "content": "two"},
+		{"role": "assistant", "model": "gpt-y", "content": "three"},
+	}}
+	ref := SourceReference{Key: "sessions/cursor/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
+	m, err := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, model := range m.Models {
+		if model.TurnCount == nil {
+			t.Fatalf("nil turn count for %#v", model)
+		}
+		counts[model.Attributes["gen_ai.request.model"]] = *model.TurnCount
+	}
+	if counts["gpt-x"] != 2 || counts["gpt-y"] != 1 {
+		t.Fatalf("turn counts=%#v", counts)
+	}
+}
+
 func TestHookModelAndAssistantOnlyFinalReconciliation(t *testing.T) {
 	now := time.Now()
 	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"role": "user", "id": "u", "turn_id": "t", "content": "q"}, {"role": "assistant", "id": "a", "turn_id": "t", "content": "a"}}, SupplementalEvidence: []SupplementalEvidence{{Kind: "lifecycle_hook", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"model_id": "canonical", "model": "label", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}}, {Kind: "final_response", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"turn_id": "t"}}, {Kind: "explicit_feedback", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"text": "ok"}}}}

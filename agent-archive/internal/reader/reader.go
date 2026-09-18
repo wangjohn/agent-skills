@@ -105,9 +105,8 @@ func matches(m archive.Metadata, f Filter) bool {
 		}
 		for _, x := range m.SkillsAvailable {
 			if (f.Skill == "" || x.Name == f.Skill) && (f.SkillSHA256 == "" || x.SHA256 == f.SkillSHA256) {
-				available = true
-				if x.Coverage != "eligible" && x.Coverage != "discovered" {
-					available = false
+				if x.Coverage == "eligible" || x.Coverage == "discovered" {
+					available = true
 				}
 			}
 		}

@@ -98,3 +98,14 @@ func TestEligibleNoUseRequiresObservedEligibility(t *testing.T) {
 		t.Fatal("unknown detection treated as no use")
 	}
 }
+
+func TestSkillAvailableEligibleEntrySurvivesLaterNonEligibleEntry(t *testing.T) {
+	f := Filter{Skill: "review", SkillUsage: "available"}
+	m := archive.Metadata{SkillsAvailable: []archive.SkillSnapshot{
+		{Name: "review", SHA256: "aaa", Coverage: "eligible"},
+		{Name: "review", SHA256: "zzz", Coverage: "installed_only"},
+	}}
+	if !matches(m, f) {
+		t.Fatal("eligible entry excluded by a later non-eligible entry for the same skill name")
+	}
+}

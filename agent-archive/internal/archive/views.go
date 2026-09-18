@@ -268,6 +268,11 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: responseStatus}
 			models[key] = model
 		}
+		if model.TurnCount == nil {
+			zero := 0
+			model.TurnCount = &zero
+		}
+		*model.TurnCount++
 	}
 	metadata.Counts.Messages = &messages
 	if len(turnIDs) > 0 {
@@ -409,6 +414,8 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 	}
 	if len(metadata.SkillsUsed) > 0 {
 		metadata.SkillDetection = "observed"
+	} else if len(metadata.SkillsAvailable) > 0 {
+		metadata.SkillDetection = "observed_none"
 	}
 	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool {
 		return metadata.SkillsAvailable[i].Name+"\x00"+metadata.SkillsAvailable[i].SHA256 < metadata.SkillsAvailable[j].Name+"\x00"+metadata.SkillsAvailable[j].SHA256
@@ -431,28 +438,6 @@ func skillNameFromPath(value string) string {
 		return ""
 	}
 	return parts[len(parts)-1]
-}
-
-func countToolCalls(value any) int {
-	switch item := value.(type) {
-	case map[string]any:
-		count := 0
-		if kind, _ := item["type"].(string); kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
-			count++
-		}
-		for _, child := range item {
-			count += countToolCalls(child)
-		}
-		return count
-	case []any:
-		count := 0
-		for _, child := range item {
-			count += countToolCalls(child)
-		}
-		return count
-	default:
-		return 0
-	}
 }
 
 // IsParseError supports the source-first publication flow.
