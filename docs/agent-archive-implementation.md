@@ -12,18 +12,24 @@ Status: implementation in progress. Passing synthetic tests does not establish l
 | Capture | Activation cutoff, project inclusion, safe native filtering, source provenance, size limits, unknown fields, model/skill gaps | Secret, hidden-content, old-session, incomplete-line tests | In progress |
 | Snapshots | Deterministic bytes/hash, timestamps, parser regeneration, hook message reconciliation | Unchanged scan and source-preservation tests | In progress |
 | Storage | R2/S3 SDK, explicit profile, Keychain, integrity, write-before-pointer, synthetic permissions probe | Fake endpoint + real provider round trips | In progress |
-| Collector | Registration, hook-only evidence, scan cadence, queue, lock, retries, delayed final, compaction, disk failures | Crash/restart/ownership tests | Pending |
+| Collector | Registration, hook-only evidence, scan cadence, queue, lock, retries, delayed final, compaction, disk failures | Crash/restart/ownership tests | In progress |
 | CLI | setup/status/sync/pause/resume/help/version; actionable errors | CLI scenario tests | Pending |
 | Setup | Existing bucket, hidden secrets, app selection, projects, consent, no history import, activation preservation | Reconfiguration/cancel/rollback tests | Pending |
 | Hooks | Three harnesses, preserve unrelated hooks, trust remains explicit, prototype migration | Merge/idempotency tests, live lifecycle tests | In progress |
 | Scheduling | Login LaunchAgent, absolute runtime path, background auth, persistent pause | Plist and fresh-process tests | Pending |
-| Metadata | Harness/version/settings; requested vs response model; skills installed vs discovered; evidence and gaps; counts | Mixed-model/no-skill fixtures | Pending review |
-| Reader | Metadata filtering, selected-source download, hash verification, on-demand normalized view, feedback provenance | Read-back and filter tests | Pending |
+| Metadata | Harness/version/settings; requested vs response model; skills installed vs discovered; evidence and gaps; counts | Mixed-model/no-skill fixtures | Done (PR #6) |
+| Reader | Metadata filtering, selected-source download, hash verification, on-demand normalized view, feedback provenance | Read-back and filter tests | Done (PR #6)\* |
 | Retention | Current/predecessor, grace period, whole-session deletion, same-machine ownership, pending-pointer safety | Expiry/race tests | Pending |
 | Distribution | Intel and ARM executables, checksums, signing/notarization, docs | Build artifacts and release workflow | Pending |
 | System verification | Two Macs, two providers, each installed harness; enabled/disabled latency | Live smoke records, timing report | Pending external access |
 
+\* Reader covers metadata filtering (harness, model, skill, coverage, eligibility), verified bounded source reads, and refresh-on-deletion recovery, each with tests. It does not yet surface individual explicit-feedback items with their own provenance to readers; `Metadata.Counts.ExplicitFeedback` is a count only. Closing that gap is follow-up work, not blocking.
+
 Evaluate Skill authoring and controlled evaluation runner are explicitly separate work in the engineering spec. This implementation must provide their reader/data interface, not silently omit it or claim the evaluation skill itself exists.
+
+## Slice sequencing after PR #6
+
+Reader and the bulk of Metadata are done. Per the spec's rollout order, the local vertical slice (adapter → filtered capture → metadata → reader) is complete; the next milestone is CLI onboarding (rollout step 3), which needs Collector, CLI, Setup, Hooks, and Scheduling — all still Pending or in-progress with no runnable entry point yet. Collector is the shared dependency: CLI's `sync`/`status` commands and the hook hand-off both need it, and it is fully testable today (crash/restart/lock/retry) without live storage credentials or a second Mac. It is the next PR.
 
 ## Current external verification prerequisites
 
