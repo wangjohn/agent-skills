@@ -336,6 +336,12 @@ func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 	available := map[string]SkillSnapshot{}
 	used := map[string]SkillUse{}
+	recordUse := func(entry SkillUse) {
+		if existing, ok := used[entry.Name]; ok && existing.SHA256 != "" {
+			return
+		}
+		used[entry.Name] = entry
+	}
 	for _, evidence := range bundle.SupplementalEvidence {
 		name := firstString(evidence.Payload, "name")
 		if name == "" && evidence.Kind != "skill_inventory" {
@@ -358,9 +364,9 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 				available[name+"\x00"+hash] = SkillSnapshot{Name: name, SHA256: hash, Coverage: coverage}
 			}
 		case "skill_invocation":
-			used[name+"\x00"+hash] = SkillUse{Name: name, SHA256: hash, Evidence: "native_invocation"}
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: "native_invocation"})
 		case "skill_read":
-			used[name+"\x00"+hash] = SkillUse{Name: name, SHA256: hash, Evidence: "skill_read_inference"}
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: "skill_read_inference"})
 		}
 	}
 	var walk func(any)
@@ -372,7 +378,7 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			if kind == "tool_use" && strings.EqualFold(tool, "skill") {
 				if input, ok := item["input"].(map[string]any); ok {
 					if name := firstString(input, "skill", "name"); name != "" {
-						used[name+"\x00"] = SkillUse{Name: name, Evidence: "native_invocation"}
+						recordUse(SkillUse{Name: name, Evidence: "native_invocation"})
 					}
 				}
 			}
@@ -385,12 +391,10 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
 			if readTool || catRead {
 				if name := skillNameFromPath(path); name != "" {
-					used[name+"\x00"] = SkillUse{Name: name, Evidence: "skill_read_inference"}
+					recordUse(SkillUse{Name: name, Evidence: "skill_read_inference"})
 				} else if catRead {
-					for _, field := range []string{command} {
-						if name := skillNameFromPath(field); name != "" {
-							used[name+"\x00"] = SkillUse{Name: name, Evidence: "skill_read_inference"}
-						}
+					if name := skillNameFromPath(command); name != "" {
+						recordUse(SkillUse{Name: name, Evidence: "skill_read_inference"})
 					}
 				}
 			}

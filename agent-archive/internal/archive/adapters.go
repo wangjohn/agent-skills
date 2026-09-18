@@ -106,20 +106,28 @@ func (CursorAdapter) FilterText(r io.Reader, freshStartedAt time.Time) (Filtered
 	}
 	result := FilteredTranscript{Format: "cursor-text", FirstEventAt: freshStartedAt.UTC(), Gaps: []CaptureGap{{Code: "text_structure_partial", Detail: "Cursor role sections retained without manufactured events"}}}
 	var retained []string
+	section := ""
 	for _, line := range strings.Split(string(content), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
 		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "system:") || strings.HasPrefix(lower, "developer:") || strings.HasPrefix(lower, "thinking:") || strings.HasPrefix(lower, "analysis:") {
+		switch {
+		case strings.HasPrefix(lower, "system:") || strings.HasPrefix(lower, "developer:") || strings.HasPrefix(lower, "thinking:") || strings.HasPrefix(lower, "analysis:"):
+			section = "hidden"
 			result.Gaps = append(result.Gaps, CaptureGap{Code: "hidden_instruction_omitted", Detail: "text section omitted"})
-			continue
-		}
-		if !(strings.HasPrefix(lower, "user:") || strings.HasPrefix(lower, "assistant:") || strings.HasPrefix(lower, "tool:")) {
+		case strings.HasPrefix(lower, "user:") || strings.HasPrefix(lower, "assistant:") || strings.HasPrefix(lower, "tool:"):
+			section = "visible"
+			retained = append(retained, line)
+		case section == "hidden":
+			// continuation line of an already-hidden section; omit.
+		case section == "visible":
+			// continuation line of the current visible section's message body.
+			retained = append(retained, line)
+		default:
 			return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has unrecognized role section"}
 		}
-		retained = append(retained, line)
 	}
 	if len(retained) == 0 {
 		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable visible sections"}
@@ -325,6 +333,10 @@ func sanitizeValue(value any, state *sanitizeState) (any, bool) {
 			if keep {
 				out = append(out, safe)
 			}
+		}
+		if len(v) > 0 && len(out) == 0 {
+			state.addGap("hidden_or_unknown_nested_content_omitted", state.record, "field omitted")
+			return nil, false
 		}
 		return out, true
 	default:

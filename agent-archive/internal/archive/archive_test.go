@@ -236,6 +236,28 @@ func TestCursorTextFailsClosedAndTypelessJSONLWorks(t *testing.T) {
 	}
 }
 
+func TestCursorTextRetainsMultilineMessageBodies(t *testing.T) {
+	input := "User: hello\nAssistant: Let me help.\nHere is more detail on a second line.\n"
+	filtered, err := (CursorAdapter{}).FilterText(strings.NewReader(input), time.Now())
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(filtered.Text) != 1 || !strings.Contains(filtered.Text[0], "second line") {
+		t.Fatalf("continuation line lost: %#v", filtered.Text)
+	}
+}
+
+func TestCursorTextOmitsHiddenSectionContinuationLines(t *testing.T) {
+	input := "User: hello\nSystem: hidden instructions\nmore hidden continuation\nAssistant: ok\n"
+	filtered, err := (CursorAdapter{}).FilterText(strings.NewReader(input), time.Now())
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(strings.ToLower(filtered.Text[0]), "hidden") {
+		t.Fatalf("hidden continuation leaked: %#v", filtered.Text)
+	}
+}
+
 func TestPreciseNativeSkillReadInference(t *testing.T) {
 	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: time.Now()}, NativeRecords: []map[string]any{{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "/skills/review-pr/SKILL.md"}}, {"type": "function_call", "command": "cat /skills/create/SKILL.md"}, {"type": "message", "role": "user", "content": "echo SKILL.md"}}}
 	m, err := BuildMetadata(bundle, "m", time.Now(), time.Now(), SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
@@ -244,6 +266,22 @@ func TestPreciseNativeSkillReadInference(t *testing.T) {
 	}
 	if len(m.SkillsUsed) != 2 || m.SkillsUsed[0].Name != "create" || m.SkillsUsed[1].Name != "review-pr" {
 		t.Fatalf("%#v", m.SkillsUsed)
+	}
+}
+
+func TestNativeAndSupplementalSkillUseDedupeByName(t *testing.T) {
+	now := time.Now()
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now},
+		NativeRecords:        []map[string]any{{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "/skills/review/SKILL.md"}}},
+		SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_read", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"name": "review", "sha256": "aaaaaaaa"}}},
+	}
+	ref := SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
+	m, err := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.SkillsUsed) != 1 || m.SkillsUsed[0].SHA256 != "aaaaaaaa" {
+		t.Fatalf("expected one deduplicated, hash-bearing entry: %#v", m.SkillsUsed)
 	}
 }
 
@@ -337,5 +375,19 @@ func TestHiddenChannelAndBearerCredentialAreRemoved(t *testing.T) {
 	joined := string(bytes.Join(f.Records, []byte("\n")))
 	if strings.Contains(joined, "hidden") || strings.Contains(joined, "token-secret-value") || !strings.Contains(joined, "final") || !strings.Contains(joined, "[REDACTED]") {
 		t.Fatalf("%s", joined)
+	}
+}
+
+func TestAllHiddenContentArrayOmitsFieldInsteadOfEmptyPlaceholder(t *testing.T) {
+	input := `{"type":"response_item","id":"x","payload":{"type":"message","role":"assistant","content":[{"type":"reasoning","text":"hidden thought only"}]}}`
+	f, e := (CodexAdapter{}).FilterJSONL(strings.NewReader(input))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(f.Records) != 1 {
+		t.Fatalf("records=%d", len(f.Records))
+	}
+	if strings.Contains(string(f.Records[0]), `"content":[]`) {
+		t.Fatalf("empty content placeholder still present: %s", f.Records[0])
 	}
 }
