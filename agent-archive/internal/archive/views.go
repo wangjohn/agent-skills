@@ -22,29 +22,49 @@ type NormalizedView struct {
 	HookFinals []HookFinalReconciliation
 }
 
+// TurnModelSource names where a NormalizedTurn's model attribution came from.
+type TurnModelSource string
+
+const (
+	TurnModelSourceTurnContext      TurnModelSource = "turn_context"
+	TurnModelSourceNativeResponse   TurnModelSource = "native_response"
+	TurnModelSourceNativeTranscript TurnModelSource = "native_transcript"
+)
+
 type NormalizedTurn struct {
-	RecordIndex   int    `json:"record_index"`
-	Role          string `json:"role"`
-	Text          string `json:"text,omitempty"`
-	Model         string `json:"model,omitempty"`
-	ResponseModel string `json:"response_model,omitempty"`
-	ModelSource   string `json:"model_source,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	Reasoning     string `json:"reasoning_level,omitempty"`
-	ID            string `json:"id,omitempty"`
-	ParentID      string `json:"parent_id,omitempty"`
-	TurnID        string `json:"turn_id,omitempty"`
-	Timestamp     string `json:"timestamp,omitempty"`
+	RecordIndex   int             `json:"record_index"`
+	Role          string          `json:"role"`
+	Text          string          `json:"text,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	ResponseModel string          `json:"response_model,omitempty"`
+	ModelSource   TurnModelSource `json:"model_source,omitempty"`
+	Provider      string          `json:"provider,omitempty"`
+	Reasoning     string          `json:"reasoning_level,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	TurnID        string          `json:"turn_id,omitempty"`
+	Timestamp     string          `json:"timestamp,omitempty"`
 }
+
+// HookFinalStatus reports how a hook-reported final response was reconciled
+// against the native transcript's turns.
+type HookFinalStatus string
+
+const (
+	HookFinalStatusUnreconciledIdentity HookFinalStatus = "unreconciled_identity"
+	HookFinalStatusSeparateSubagent     HookFinalStatus = "separate_subagent"
+	HookFinalStatusMatchedMessageID     HookFinalStatus = "matched_message_id"
+	HookFinalStatusMatchedTurnID        HookFinalStatus = "matched_turn_id"
+)
 
 // HookFinalReconciliation keeps hook-only finals separate from native source.
 // It never uses identical text as a deduplication signal.
 type HookFinalReconciliation struct {
-	EvidenceIndex int    `json:"evidence_index"`
-	Status        string `json:"status"`
-	MessageID     string `json:"message_id,omitempty"`
-	TurnID        string `json:"turn_id,omitempty"`
-	AgentID       string `json:"agent_id,omitempty"`
+	EvidenceIndex int             `json:"evidence_index"`
+	Status        HookFinalStatus `json:"status"`
+	MessageID     string          `json:"message_id,omitempty"`
+	TurnID        string          `json:"turn_id,omitempty"`
+	AgentID       string          `json:"agent_id,omitempty"`
 }
 
 type NormalizedToolCall struct {
@@ -79,11 +99,11 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		}
 		turn := NormalizedTurn{RecordIndex: i, Role: role, Text: text, Provider: firstStringDeep(record, "model_provider"), ID: firstStringDeep(record, "id", "uuid"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), TurnID: firstStringDeep(record, "turn_id"), Timestamp: firstStringDeep(record, "timestamp", "created_at")}
 		if bundle.Capture.Harness.Name == "codex" {
-			turn.Model, turn.Reasoning, turn.ModelSource = codexModel, codexReasoning, "turn_context"
+			turn.Model, turn.Reasoning, turn.ModelSource = codexModel, codexReasoning, TurnModelSourceTurnContext
 		} else if bundle.Capture.Harness.Name == "claude" {
-			turn.ResponseModel, turn.ModelSource = firstStringDeep(record, "model", "model_id"), "native_response"
+			turn.ResponseModel, turn.ModelSource = firstStringDeep(record, "model", "model_id"), TurnModelSourceNativeResponse
 		} else {
-			turn.Model, turn.Reasoning, turn.ModelSource = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort"), "native_transcript"
+			turn.Model, turn.Reasoning, turn.ModelSource = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort"), TurnModelSourceNativeTranscript
 		}
 		view.Turns = append(view.Turns, turn)
 	}
@@ -94,20 +114,20 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFinalReconciliation {
 	var out []HookFinalReconciliation
 	for index, evidence := range bundle.SupplementalEvidence {
-		if evidence.Kind != "final_response" {
+		if evidence.Kind != EvidenceKindFinalResponse {
 			continue
 		}
-		final := HookFinalReconciliation{EvidenceIndex: index, MessageID: firstString(evidence.Payload, "message_id"), TurnID: firstString(evidence.Payload, "turn_id"), AgentID: firstString(evidence.Payload, "agent_id"), Status: "unreconciled_identity"}
+		final := HookFinalReconciliation{EvidenceIndex: index, MessageID: firstString(evidence.Payload, "message_id"), TurnID: firstString(evidence.Payload, "turn_id"), AgentID: firstString(evidence.Payload, "agent_id"), Status: HookFinalStatusUnreconciledIdentity}
 		if final.AgentID != "" {
-			final.Status = "separate_subagent"
+			final.Status = HookFinalStatusSeparateSubagent
 		} else {
 			for _, turn := range turns {
 				if final.MessageID != "" && final.MessageID == turn.ID {
-					final.Status = "matched_message_id"
+					final.Status = HookFinalStatusMatchedMessageID
 					break
 				}
 				if final.TurnID != "" && turn.Role == "assistant" && final.TurnID == turn.TurnID {
-					final.Status = "matched_turn_id"
+					final.Status = HookFinalStatusMatchedTurnID
 					break
 				}
 			}
@@ -222,19 +242,19 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		parser.Version = bundle.Capture.AdapterVersion
 	}
 	if parser.Status == "" {
-		parser.Status = "partial"
+		parser.Status = ParserStatusPartial
 	}
 	metadata := Metadata{
 		SchemaVersion: MetadataSchemaVersion, SessionID: bundle.ArchiveSessionID, NativeSessionID: bundle.NativeSessionID,
 		MachineID: machineID, ProjectID: bundle.ProjectID, StartedAt: startedAt.UTC(), CapturedAt: bundle.Capture.CapturedAt.UTC(),
 		MetadataDerivedAt: derivedAt.UTC(), Harness: bundle.Capture.Harness,
 		Adapter: AdapterInfo{Name: bundle.Capture.AdapterName, Version: bundle.Capture.AdapterVersion}, Parser: parser,
-		FilterVersion: bundle.Capture.FilterVersion, State: "unknown", SkillDetection: "unavailable",
+		FilterVersion: bundle.Capture.FilterVersion, State: MetadataStateUnknown, SkillDetection: SkillDetectionUnavailable,
 		CaptureGaps: append([]CaptureGap(nil), bundle.Capture.Gaps...), SourceBundle: reference,
 	}
 	view, err := ParseNormalized(bundle)
 	if err != nil {
-		metadata.Parser.Status = "failed"
+		metadata.Parser.Status = ParserStatusFailed
 		return metadata, err
 	}
 	messages := 0
@@ -248,9 +268,9 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		if turn.Role == "user" && turn.ID != "" {
 			turnIDs[turn.ID] = true
 		}
-		modelName, attribute, responseStatus := turn.Model, "gen_ai.request.model", "not_exposed"
+		modelName, attribute, responseStatus := turn.Model, "gen_ai.request.model", ResponseModelStatusNotExposed
 		if modelName == "" && turn.ResponseModel != "" {
-			modelName, attribute, responseStatus = turn.ResponseModel, "gen_ai.response.model", "observed"
+			modelName, attribute, responseStatus = turn.ResponseModel, "gen_ai.response.model", ResponseModelStatusObserved
 		}
 		if modelName == "" {
 			continue
@@ -265,7 +285,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 			if turn.Reasoning != "" {
 				attributes["gen_ai.request.reasoning.level"] = turn.Reasoning
 			}
-			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: responseStatus}
+			model = &ModelSummary{Attributes: attributes, Source: ModelSummarySourceNativeTranscript, ResponseModelStatus: responseStatus}
 			models[key] = model
 		}
 		if model.TurnCount == nil {
@@ -293,7 +313,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 	deriveSkills(bundle, &metadata)
 	feedback := 0
 	for _, e := range bundle.SupplementalEvidence {
-		if e.Kind == "explicit_feedback" {
+		if e.Kind == EvidenceKindExplicitFeedback {
 			feedback++
 		}
 	}
@@ -304,7 +324,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 	seen := map[string]bool{}
 	for _, evidence := range bundle.SupplementalEvidence {
-		if evidence.Kind != "lifecycle_hook" && evidence.Kind != "final_response" {
+		if evidence.Kind != EvidenceKindLifecycleHook && evidence.Kind != EvidenceKindFinalResponse {
 			continue
 		}
 		id, label := firstString(evidence.Payload, "model_id"), firstString(evidence.Payload, "model")
@@ -329,7 +349,7 @@ func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 				}
 			}
 		}
-		metadata.Models = append(metadata.Models, ModelSummary{Attributes: attrs, Source: "hook", ResponseModelStatus: "not_exposed"})
+		metadata.Models = append(metadata.Models, ModelSummary{Attributes: attrs, Source: ModelSummarySourceHook, ResponseModelStatus: ResponseModelStatusNotExposed})
 	}
 }
 
@@ -344,13 +364,13 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 	}
 	for _, evidence := range bundle.SupplementalEvidence {
 		name := firstString(evidence.Payload, "name")
-		if name == "" && evidence.Kind != "skill_inventory" {
+		if name == "" && evidence.Kind != EvidenceKindSkillInventory {
 			continue
 		}
 		hash := firstString(evidence.Payload, "sha256")
 		switch evidence.Kind {
-		case "skill_inventory", "skill_discovered", "skill_snapshot":
-			coverage := firstString(evidence.Payload, "coverage")
+		case EvidenceKindSkillInventory, EvidenceKindSkillDiscovered, EvidenceKindSkillSnapshot:
+			coverage := SkillCoverage(firstString(evidence.Payload, "coverage"))
 			if skills, ok := evidence.Payload["skills"].([]any); ok {
 				for _, raw := range skills {
 					if skill, ok := raw.(map[string]any); ok {
@@ -363,10 +383,10 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			} else {
 				available[name+"\x00"+hash] = SkillSnapshot{Name: name, SHA256: hash, Coverage: coverage}
 			}
-		case "skill_invocation":
-			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: "native_invocation"})
-		case "skill_read":
-			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: "skill_read_inference"})
+		case EvidenceKindSkillInvocation:
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: SkillUseEvidenceNativeInvocation})
+		case EvidenceKindSkillRead:
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: SkillUseEvidenceReadInference})
 		}
 	}
 	var walk func(any)
@@ -378,7 +398,7 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			if kind == "tool_use" && strings.EqualFold(tool, "skill") {
 				if input, ok := item["input"].(map[string]any); ok {
 					if name := firstString(input, "skill", "name"); name != "" {
-						recordUse(SkillUse{Name: name, Evidence: "native_invocation"})
+						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceNativeInvocation})
 					}
 				}
 			}
@@ -391,10 +411,10 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
 			if readTool || catRead {
 				if name := skillNameFromPath(path); name != "" {
-					recordUse(SkillUse{Name: name, Evidence: "skill_read_inference"})
+					recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
 				} else if catRead {
 					if name := skillNameFromPath(command); name != "" {
-						recordUse(SkillUse{Name: name, Evidence: "skill_read_inference"})
+						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
 					}
 				}
 			}
@@ -417,9 +437,9 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 		metadata.SkillsUsed = append(metadata.SkillsUsed, entry)
 	}
 	if len(metadata.SkillsUsed) > 0 {
-		metadata.SkillDetection = "observed"
+		metadata.SkillDetection = SkillDetectionObserved
 	} else if len(metadata.SkillsAvailable) > 0 {
-		metadata.SkillDetection = "observed_none"
+		metadata.SkillDetection = SkillDetectionObservedNone
 	}
 	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool {
 		return metadata.SkillsAvailable[i].Name+"\x00"+metadata.SkillsAvailable[i].SHA256 < metadata.SkillsAvailable[j].Name+"\x00"+metadata.SkillsAvailable[j].SHA256

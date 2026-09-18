@@ -20,11 +20,30 @@ import (
 
 var ErrRefreshRequired = errors.New("source changed or was deleted; refresh metadata and retry")
 
+// SkillUsage narrows a Filter's Skill/SkillSHA256 match to a specific
+// relationship between a session and the named skill. The zero value means
+// "the skill was used".
+type SkillUsage string
+
+const (
+	// SkillUsageUsed is the default (zero-value) behavior: match sessions
+	// that actually used the skill.
+	SkillUsageUsed SkillUsage = "used"
+	// SkillUsageAvailable matches sessions where the skill was available
+	// (eligible or discovered coverage), regardless of whether it was used.
+	SkillUsageAvailable SkillUsage = "available"
+	// SkillUsageEligibleNoUse matches sessions where the skill was eligible
+	// but never used. It requires the metadata's SkillDetection to be
+	// archive.SkillDetectionObservedNone; anything else (including
+	// archive.SkillDetectionUnavailable) is treated as unknown, not "no use".
+	SkillUsageEligibleNoUse SkillUsage = "eligible_no_use"
+)
+
 type Filter struct {
 	Harness, Model, Skill, SkillSHA256 string
 	From, To                           time.Time
 	RequireCompleteCoverage            bool
-	SkillUsage                         string
+	SkillUsage                         SkillUsage
 }
 type Limits struct{ MaxCompressedBytes, MaxUncompressedBytes int }
 
@@ -82,7 +101,7 @@ func matches(m archive.Metadata, f Filter) bool {
 	if !f.To.IsZero() && m.CapturedAt.After(f.To) {
 		return false
 	}
-	if f.RequireCompleteCoverage && (m.Parser.Status != "complete" || len(m.CaptureGaps) != 0) {
+	if f.RequireCompleteCoverage && (m.Parser.Status != archive.ParserStatusComplete || len(m.CaptureGaps) != 0) {
 		return false
 	}
 	if f.Model != "" {
@@ -105,14 +124,25 @@ func matches(m archive.Metadata, f Filter) bool {
 		}
 		for _, x := range m.SkillsAvailable {
 			if (f.Skill == "" || x.Name == f.Skill) && (f.SkillSHA256 == "" || x.SHA256 == f.SkillSHA256) {
-				if x.Coverage == "eligible" || x.Coverage == "discovered" {
+				if x.Coverage == archive.SkillCoverageEligible || x.Coverage == archive.SkillCoverageDiscovered {
 					available = true
 				}
 			}
 		}
-		eligibleNoUse := available && used == false && m.SkillDetection == "observed_none"
-		if (f.SkillUsage == "available" && !available) || (f.SkillUsage == "eligible_no_use" && !eligibleNoUse) || (f.SkillUsage != "available" && f.SkillUsage != "eligible_no_use" && !used) {
-			return false
+		eligibleNoUse := available && !used && m.SkillDetection == archive.SkillDetectionObservedNone
+		switch f.SkillUsage {
+		case SkillUsageAvailable:
+			if !available {
+				return false
+			}
+		case SkillUsageEligibleNoUse:
+			if !eligibleNoUse {
+				return false
+			}
+		default: // SkillUsageUsed, or the zero value
+			if !used {
+				return false
+			}
 		}
 	}
 	return true

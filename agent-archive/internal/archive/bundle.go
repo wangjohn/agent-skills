@@ -96,7 +96,7 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 	out := make([]SupplementalEvidence, 0, len(in))
 	var gaps []CaptureGap
 	for _, evidence := range in {
-		if strings.TrimSpace(evidence.Kind) == "" || strings.TrimSpace(evidence.Provenance) == "" || evidence.ObservedAt.IsZero() {
+		if strings.TrimSpace(string(evidence.Kind)) == "" || strings.TrimSpace(evidence.Provenance) == "" || evidence.ObservedAt.IsZero() {
 			return nil, nil, errors.New("supplemental evidence requires kind, provenance, and observation time")
 		}
 		state := sanitizeState{addGap: func(code string, _ int, detail string) {
@@ -107,7 +107,7 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 			gaps = append(gaps, CaptureGap{Code: "supplemental_evidence_omitted", Detail: "no allowed fields"})
 			continue
 		}
-		if evidence.Kind == "final_response" && firstString(payload, "agent_id") != "" {
+		if evidence.Kind == EvidenceKindFinalResponse && firstString(payload, "agent_id") != "" {
 			gaps = append(gaps, CaptureGap{Code: "subagent_final_not_reconciled", Detail: "separate subagent source required"})
 		}
 		out = append(out, SupplementalEvidence{Kind: evidence.Kind, ObservedAt: evidence.ObservedAt.UTC(), Provenance: evidence.Provenance, Payload: payload})

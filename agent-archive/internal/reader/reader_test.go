@@ -84,26 +84,26 @@ func TestRefreshRequiredForDeletedSource(t *testing.T) {
 }
 
 func TestEligibleNoUseRequiresObservedEligibility(t *testing.T) {
-	f := Filter{Skill: "review", SkillUsage: "eligible_no_use"}
-	m := archive.Metadata{SkillDetection: "observed_none", SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: "installed_only"}}}
+	f := Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}
+	m := archive.Metadata{SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageInstalledOnly}}}
 	if matches(m, f) {
 		t.Fatal("installed_only treated as eligible")
 	}
-	m.SkillsAvailable[0].Coverage = "eligible"
+	m.SkillsAvailable[0].Coverage = archive.SkillCoverageEligible
 	if !matches(m, f) {
 		t.Fatal("eligible observed-none excluded")
 	}
-	m.SkillDetection = "unavailable"
+	m.SkillDetection = archive.SkillDetectionUnavailable
 	if matches(m, f) {
 		t.Fatal("unknown detection treated as no use")
 	}
 }
 
 func TestSkillAvailableEligibleEntrySurvivesLaterNonEligibleEntry(t *testing.T) {
-	f := Filter{Skill: "review", SkillUsage: "available"}
+	f := Filter{Skill: "review", SkillUsage: SkillUsageAvailable}
 	m := archive.Metadata{SkillsAvailable: []archive.SkillSnapshot{
-		{Name: "review", SHA256: "aaa", Coverage: "eligible"},
-		{Name: "review", SHA256: "zzz", Coverage: "installed_only"},
+		{Name: "review", SHA256: "aaa", Coverage: archive.SkillCoverageEligible},
+		{Name: "review", SHA256: "zzz", Coverage: archive.SkillCoverageInstalledOnly},
 	}}
 	if !matches(m, f) {
 		t.Fatal("eligible entry excluded by a later non-eligible entry for the same skill name")

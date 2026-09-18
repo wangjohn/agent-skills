@@ -124,7 +124,7 @@ func TestSourceBundleIsDeterministicAndGzipTimestampIsFixed(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle, err := NewSourceBundle(registration(), CodexAdapter{}, filtered, time.Date(2026, 9, 17, 18, 25, 0, 0, time.UTC), []SupplementalEvidence{{
-		Kind: "explicit_feedback", Provenance: "hook", ObservedAt: time.Date(2026, 9, 17, 18, 26, 0, 0, time.UTC), Payload: map[string]any{"text": "fixed password=synthetic-value"},
+		Kind: EvidenceKindExplicitFeedback, Provenance: "hook", ObservedAt: time.Date(2026, 9, 17, 18, 26, 0, 0, time.UTC), Payload: map[string]any{"text": "fixed password=synthetic-value"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestMetadataParserFailureLeavesMinimalSourceFirstMetadata(t *testing.T) {
 	if !IsParseError(err) {
 		t.Fatalf("expected ParseError, got %v", err)
 	}
-	if metadata.Parser.Status != "failed" || metadata.Counts.Turns != nil || metadata.SourceBundle.SHA256 == "" {
+	if metadata.Parser.Status != ParserStatusFailed || metadata.Counts.Turns != nil || metadata.SourceBundle.SHA256 == "" {
 		t.Fatalf("unexpected failed metadata: %#v", metadata)
 	}
 }
@@ -273,7 +273,7 @@ func TestNativeAndSupplementalSkillUseDedupeByName(t *testing.T) {
 	now := time.Now()
 	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now},
 		NativeRecords:        []map[string]any{{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "/skills/review/SKILL.md"}}},
-		SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_read", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"name": "review", "sha256": "aaaaaaaa"}}},
+		SupplementalEvidence: []SupplementalEvidence{{Kind: EvidenceKindSkillRead, ObservedAt: now, Provenance: "hook", Payload: map[string]any{"name": "review", "sha256": "aaaaaaaa"}}},
 	}
 	ref := SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
 	m, err := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
@@ -287,13 +287,13 @@ func TestNativeAndSupplementalSkillUseDedupeByName(t *testing.T) {
 
 func TestEligibleSkillNotUsedMarksObservedNone(t *testing.T) {
 	now := time.Now()
-	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_inventory", ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "eligible", "skills": []any{map[string]any{"name": "review", "sha256": "aaa"}}}}}}
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "eligible", "skills": []any{map[string]any{"name": "review", "sha256": "aaa"}}}}}}
 	ref := SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
 	m, err := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.SkillDetection != "observed_none" {
+	if m.SkillDetection != SkillDetectionObservedNone {
 		t.Fatalf("SkillDetection=%q, want observed_none", m.SkillDetection)
 	}
 }
@@ -324,23 +324,23 @@ func TestModelSummaryTracksTurnCount(t *testing.T) {
 
 func TestHookModelAndAssistantOnlyFinalReconciliation(t *testing.T) {
 	now := time.Now()
-	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"role": "user", "id": "u", "turn_id": "t", "content": "q"}, {"role": "assistant", "id": "a", "turn_id": "t", "content": "a"}}, SupplementalEvidence: []SupplementalEvidence{{Kind: "lifecycle_hook", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"model_id": "canonical", "model": "label", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}}, {Kind: "final_response", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"turn_id": "t"}}, {Kind: "explicit_feedback", ObservedAt: now, Provenance: "hook", Payload: map[string]any{"text": "ok"}}}}
+	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"role": "user", "id": "u", "turn_id": "t", "content": "q"}, {"role": "assistant", "id": "a", "turn_id": "t", "content": "a"}}, SupplementalEvidence: []SupplementalEvidence{{Kind: EvidenceKindLifecycleHook, ObservedAt: now, Provenance: "hook", Payload: map[string]any{"model_id": "canonical", "model": "label", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}}, {Kind: EvidenceKindFinalResponse, ObservedAt: now, Provenance: "hook", Payload: map[string]any{"turn_id": "t"}}, {Kind: EvidenceKindExplicitFeedback, ObservedAt: now, Provenance: "hook", Payload: map[string]any{"text": "ok"}}}}
 	m, err := BuildMetadata(bundle, "m", now, now, SourceReference{Key: "sessions/cursor/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Models) != 1 || m.Models[0].Attributes["gen_ai.request.model"] != "canonical" || m.Models[0].ResponseModelStatus != "not_exposed" || *m.Counts.ExplicitFeedback != 1 {
+	if len(m.Models) != 1 || m.Models[0].Attributes["gen_ai.request.model"] != "canonical" || m.Models[0].ResponseModelStatus != ResponseModelStatusNotExposed || *m.Counts.ExplicitFeedback != 1 {
 		t.Fatalf("%#v", m)
 	}
 	view, err := ParseNormalized(bundle)
-	if err != nil || view.HookFinals[0].Status != "matched_turn_id" {
+	if err != nil || view.HookFinals[0].Status != HookFinalStatusMatchedTurnID {
 		t.Fatalf("%v %#v", err, view.HookFinals)
 	}
 }
 
 func TestSameNameDifferentHashInventoryMetadataIsDeterministic(t *testing.T) {
 	now := time.Now()
-	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: "skill_inventory", ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "installed_only", "skills": []any{map[string]any{"name": "same", "sha256": "bbb"}, map[string]any{"name": "same", "sha256": "aaa"}}}}}}
+	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "installed_only", "skills": []any{map[string]any{"name": "same", "sha256": "bbb"}, map[string]any{"name": "same", "sha256": "aaa"}}}}}}
 	ref := SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
 	one, e := BuildMetadata(b, "m", now, now, ref, ParserInfo{})
 	if e != nil {
