@@ -17,19 +17,62 @@ func (e *ParseError) Error() string { return "metadata parse failed: " + e.Reaso
 // NormalizedView is an in-memory analysis aid. It must never be uploaded as a
 // second transcript representation.
 type NormalizedView struct {
-	Turns []NormalizedTurn
+	Turns      []NormalizedTurn
+	ToolCalls  []NormalizedToolCall
+	HookFinals []HookFinalReconciliation
 }
 
+// TurnModelSource names where a NormalizedTurn's model attribution came from.
+type TurnModelSource string
+
+const (
+	TurnModelSourceTurnContext      TurnModelSource = "turn_context"
+	TurnModelSourceNativeResponse   TurnModelSource = "native_response"
+	TurnModelSourceNativeTranscript TurnModelSource = "native_transcript"
+)
+
 type NormalizedTurn struct {
+	RecordIndex   int             `json:"record_index"`
+	Role          string          `json:"role"`
+	Text          string          `json:"text,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	ResponseModel string          `json:"response_model,omitempty"`
+	ModelSource   TurnModelSource `json:"model_source,omitempty"`
+	Provider      string          `json:"provider,omitempty"`
+	Reasoning     string          `json:"reasoning_level,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	TurnID        string          `json:"turn_id,omitempty"`
+	Timestamp     string          `json:"timestamp,omitempty"`
+}
+
+// HookFinalStatus reports how a hook-reported final response was reconciled
+// against the native transcript's turns.
+type HookFinalStatus string
+
+const (
+	HookFinalStatusUnreconciledIdentity HookFinalStatus = "unreconciled_identity"
+	HookFinalStatusSeparateSubagent     HookFinalStatus = "separate_subagent"
+	HookFinalStatusMatchedMessageID     HookFinalStatus = "matched_message_id"
+	HookFinalStatusMatchedTurnID        HookFinalStatus = "matched_turn_id"
+)
+
+// HookFinalReconciliation keeps hook-only finals separate from native source.
+// It never uses identical text as a deduplication signal.
+type HookFinalReconciliation struct {
+	EvidenceIndex int             `json:"evidence_index"`
+	Status        HookFinalStatus `json:"status"`
+	MessageID     string          `json:"message_id,omitempty"`
+	TurnID        string          `json:"turn_id,omitempty"`
+	AgentID       string          `json:"agent_id,omitempty"`
+}
+
+type NormalizedToolCall struct {
 	RecordIndex int    `json:"record_index"`
-	Role        string `json:"role"`
-	Text        string `json:"text,omitempty"`
-	Model       string `json:"model,omitempty"`
-	Provider    string `json:"provider,omitempty"`
-	Reasoning   string `json:"reasoning_level,omitempty"`
-	ID          string `json:"id,omitempty"`
+	CallID      string `json:"call_id,omitempty"`
 	ParentID    string `json:"parent_id,omitempty"`
-	Timestamp   string `json:"timestamp,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Reasoning   string `json:"reasoning_level,omitempty"`
 }
 
 // ParseNormalized derives a narrow view from already-filtered source. The
@@ -40,7 +83,13 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		return NormalizedView{}, &ParseError{Reason: err.Error()}
 	}
 	view := NormalizedView{}
+	var codexModel, codexReasoning string
 	for i, record := range bundle.NativeRecords {
+		if bundle.Capture.Harness.Name == "codex" && firstString(record, "type") == "turn_context" {
+			codexModel, codexReasoning = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort")
+			continue
+		}
+		view.ToolCalls = append(view.ToolCalls, toolCalls(record, i, codexModel, codexReasoning)...)
 		role, text, ok := findVisibleMessage(record)
 		if !ok {
 			continue
@@ -48,9 +97,67 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		if isHiddenRole(role) {
 			return NormalizedView{}, &ParseError{Reason: "hidden role present in filtered source"}
 		}
-		view.Turns = append(view.Turns, NormalizedTurn{RecordIndex: i, Role: role, Text: text, Model: firstStringDeep(record, "model"), Provider: firstStringDeep(record, "model_provider"), Reasoning: firstStringDeep(record, "reasoning_effort"), ID: firstStringDeep(record, "id", "uuid"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Timestamp: firstStringDeep(record, "timestamp", "created_at")})
+		turn := NormalizedTurn{RecordIndex: i, Role: role, Text: text, Provider: firstStringDeep(record, "model_provider"), ID: firstStringDeep(record, "id", "uuid"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), TurnID: firstStringDeep(record, "turn_id"), Timestamp: firstStringDeep(record, "timestamp", "created_at")}
+		if bundle.Capture.Harness.Name == "codex" {
+			turn.Model, turn.Reasoning, turn.ModelSource = codexModel, codexReasoning, TurnModelSourceTurnContext
+		} else if bundle.Capture.Harness.Name == "claude" {
+			turn.ResponseModel, turn.ModelSource = firstStringDeep(record, "model", "model_id"), TurnModelSourceNativeResponse
+		} else {
+			turn.Model, turn.Reasoning, turn.ModelSource = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort"), TurnModelSourceNativeTranscript
+		}
+		view.Turns = append(view.Turns, turn)
 	}
+	view.HookFinals = reconcileHookFinals(bundle, view.Turns)
 	return view, nil
+}
+
+func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFinalReconciliation {
+	var out []HookFinalReconciliation
+	for index, evidence := range bundle.SupplementalEvidence {
+		if evidence.Kind != EvidenceKindFinalResponse {
+			continue
+		}
+		final := HookFinalReconciliation{EvidenceIndex: index, MessageID: firstString(evidence.Payload, "message_id"), TurnID: firstString(evidence.Payload, "turn_id"), AgentID: firstString(evidence.Payload, "agent_id"), Status: HookFinalStatusUnreconciledIdentity}
+		if final.AgentID != "" {
+			final.Status = HookFinalStatusSeparateSubagent
+		} else {
+			for _, turn := range turns {
+				if final.MessageID != "" && final.MessageID == turn.ID {
+					final.Status = HookFinalStatusMatchedMessageID
+					break
+				}
+				if final.TurnID != "" && turn.Role == "assistant" && final.TurnID == turn.TurnID {
+					final.Status = HookFinalStatusMatchedTurnID
+					break
+				}
+			}
+		}
+		out = append(out, final)
+	}
+	return out
+}
+
+func toolCalls(record map[string]any, index int, model, reasoning string) []NormalizedToolCall {
+	var out []NormalizedToolCall
+	var walk func(any)
+	walk = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			kind, _ := item["type"].(string)
+			if kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
+				out = append(out, NormalizedToolCall{RecordIndex: index, CallID: firstString(item, "call_id", "id"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Model: model, Reasoning: reasoning})
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
+			}
+		}
+	}
+	walk(record)
+	return out
 }
 
 func findVisibleMessage(record map[string]any) (string, string, bool) {
@@ -135,42 +242,50 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		parser.Version = bundle.Capture.AdapterVersion
 	}
 	if parser.Status == "" {
-		parser.Status = "partial"
+		parser.Status = ParserStatusPartial
 	}
 	metadata := Metadata{
 		SchemaVersion: MetadataSchemaVersion, SessionID: bundle.ArchiveSessionID, NativeSessionID: bundle.NativeSessionID,
 		MachineID: machineID, ProjectID: bundle.ProjectID, StartedAt: startedAt.UTC(), CapturedAt: bundle.Capture.CapturedAt.UTC(),
 		MetadataDerivedAt: derivedAt.UTC(), Harness: bundle.Capture.Harness,
 		Adapter: AdapterInfo{Name: bundle.Capture.AdapterName, Version: bundle.Capture.AdapterVersion}, Parser: parser,
-		FilterVersion: bundle.Capture.FilterVersion, State: "unknown", SkillDetection: "unavailable",
+		FilterVersion: bundle.Capture.FilterVersion, State: MetadataStateUnknown, SkillDetection: SkillDetectionUnavailable,
 		CaptureGaps: append([]CaptureGap(nil), bundle.Capture.Gaps...), SourceBundle: reference,
 	}
 	view, err := ParseNormalized(bundle)
 	if err != nil {
-		metadata.Parser.Status = "failed"
+		metadata.Parser.Status = ParserStatusFailed
 		return metadata, err
 	}
-	turns := 0
+	messages := 0
+	turnIDs := map[string]bool{}
 	models := map[string]*ModelSummary{}
 	for _, turn := range view.Turns {
 		if turn.Role != "user" && turn.Role != "assistant" {
 			continue
 		}
-		turns++
-		if turn.Model == "" {
+		messages++
+		if turn.Role == "user" && turn.ID != "" {
+			turnIDs[turn.ID] = true
+		}
+		modelName, attribute, responseStatus := turn.Model, "gen_ai.request.model", ResponseModelStatusNotExposed
+		if modelName == "" && turn.ResponseModel != "" {
+			modelName, attribute, responseStatus = turn.ResponseModel, "gen_ai.response.model", ResponseModelStatusObserved
+		}
+		if modelName == "" {
 			continue
 		}
-		key := turn.Provider + "\x00" + turn.Model + "\x00" + turn.Reasoning
+		key := attribute + "\x00" + turn.Provider + "\x00" + modelName + "\x00" + turn.Reasoning
 		model := models[key]
 		if model == nil {
-			attributes := map[string]string{"gen_ai.request.model": turn.Model}
+			attributes := map[string]string{attribute: modelName}
 			if turn.Provider != "" {
 				attributes["gen_ai.provider.name"] = turn.Provider
 			}
 			if turn.Reasoning != "" {
 				attributes["gen_ai.request.reasoning.level"] = turn.Reasoning
 			}
-			model = &ModelSummary{Attributes: attributes, Source: "native_transcript", ResponseModelStatus: "not_exposed"}
+			model = &ModelSummary{Attributes: attributes, Source: ModelSummarySourceNativeTranscript, ResponseModelStatus: responseStatus}
 			models[key] = model
 		}
 		if model.TurnCount == nil {
@@ -179,11 +294,12 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		}
 		*model.TurnCount++
 	}
-	metadata.Counts.Turns = &turns
-	toolCalls := 0
-	for _, record := range bundle.NativeRecords {
-		toolCalls += countToolCalls(record)
+	metadata.Counts.Messages = &messages
+	if len(turnIDs) > 0 {
+		turns := len(turnIDs)
+		metadata.Counts.Turns = &turns
 	}
+	toolCalls := len(view.ToolCalls)
 	metadata.Counts.ToolCalls = &toolCalls
 	modelKeys := make([]string, 0, len(models))
 	for key := range models {
@@ -193,29 +309,159 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 	for _, key := range modelKeys {
 		metadata.Models = append(metadata.Models, *models[key])
 	}
+	deriveHookModels(bundle, &metadata)
+	deriveSkills(bundle, &metadata)
+	feedback := 0
+	for _, e := range bundle.SupplementalEvidence {
+		if e.Kind == EvidenceKindExplicitFeedback {
+			feedback++
+		}
+	}
+	metadata.Counts.ExplicitFeedback = &feedback
 	return metadata, nil
 }
 
-func countToolCalls(value any) int {
-	switch item := value.(type) {
-	case map[string]any:
-		count := 0
-		if kind, _ := item["type"].(string); kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
-			count++
+func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
+	seen := map[string]bool{}
+	for _, evidence := range bundle.SupplementalEvidence {
+		if evidence.Kind != EvidenceKindLifecycleHook && evidence.Kind != EvidenceKindFinalResponse {
+			continue
 		}
-		for _, child := range item {
-			count += countToolCalls(child)
+		id, label := firstString(evidence.Payload, "model_id"), firstString(evidence.Payload, "model")
+		if id == "" {
+			continue
 		}
-		return count
-	case []any:
-		count := 0
-		for _, child := range item {
-			count += countToolCalls(child)
+		key := id + "\x00" + label
+		if seen[key] {
+			continue
 		}
-		return count
-	default:
-		return 0
+		seen[key] = true
+		attrs := map[string]string{"gen_ai.request.model": id}
+		if label != "" {
+			attrs["gen_ai.request.model.label"] = label
+		}
+		if params, ok := evidence.Payload["model_params"].([]any); ok {
+			for _, raw := range params {
+				if p, ok := raw.(map[string]any); ok {
+					if name, value := firstString(p, "id"), firstString(p, "value"); name != "" {
+						attrs["gen_ai.request.setting."+name] = value
+					}
+				}
+			}
+		}
+		metadata.Models = append(metadata.Models, ModelSummary{Attributes: attrs, Source: ModelSummarySourceHook, ResponseModelStatus: ResponseModelStatusNotExposed})
 	}
+}
+
+func deriveSkills(bundle SourceBundle, metadata *Metadata) {
+	available := map[string]SkillSnapshot{}
+	used := map[string]SkillUse{}
+	recordUse := func(entry SkillUse) {
+		if existing, ok := used[entry.Name]; ok && existing.SHA256 != "" {
+			return
+		}
+		used[entry.Name] = entry
+	}
+	for _, evidence := range bundle.SupplementalEvidence {
+		name := firstString(evidence.Payload, "name")
+		if name == "" && evidence.Kind != EvidenceKindSkillInventory {
+			continue
+		}
+		hash := firstString(evidence.Payload, "sha256")
+		switch evidence.Kind {
+		case EvidenceKindSkillInventory, EvidenceKindSkillDiscovered, EvidenceKindSkillSnapshot:
+			coverage := SkillCoverage(firstString(evidence.Payload, "coverage"))
+			if skills, ok := evidence.Payload["skills"].([]any); ok {
+				for _, raw := range skills {
+					if skill, ok := raw.(map[string]any); ok {
+						n, h := firstString(skill, "name"), firstString(skill, "sha256")
+						if n != "" {
+							available[n+"\x00"+h] = SkillSnapshot{Name: n, SHA256: h, Coverage: coverage}
+						}
+					}
+				}
+			} else {
+				available[name+"\x00"+hash] = SkillSnapshot{Name: name, SHA256: hash, Coverage: coverage}
+			}
+		case EvidenceKindSkillInvocation:
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: SkillUseEvidenceNativeInvocation})
+		case EvidenceKindSkillRead:
+			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: SkillUseEvidenceReadInference})
+		}
+	}
+	var walk func(any)
+	walk = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			kind, _ := item["type"].(string)
+			tool := firstString(item, "name", "tool_name")
+			if kind == "tool_use" && strings.EqualFold(tool, "skill") {
+				if input, ok := item["input"].(map[string]any); ok {
+					if name := firstString(input, "skill", "name"); name != "" {
+						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceNativeInvocation})
+					}
+				}
+			}
+			path := firstString(item, "file_path", "path")
+			if input, ok := item["input"].(map[string]any); ok && path == "" {
+				path = firstString(input, "file_path", "path")
+			}
+			command := firstString(item, "command", "arguments")
+			readTool := strings.EqualFold(tool, "read") || strings.EqualFold(tool, "read_file")
+			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
+			if readTool || catRead {
+				if name := skillNameFromPath(path); name != "" {
+					recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
+				} else if catRead {
+					if name := skillNameFromPath(command); name != "" {
+						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
+					}
+				}
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
+			}
+		}
+	}
+	for _, record := range bundle.NativeRecords {
+		walk(record)
+	}
+	for _, entry := range available {
+		metadata.SkillsAvailable = append(metadata.SkillsAvailable, entry)
+	}
+	for _, entry := range used {
+		metadata.SkillsUsed = append(metadata.SkillsUsed, entry)
+	}
+	if len(metadata.SkillsUsed) > 0 {
+		metadata.SkillDetection = SkillDetectionObserved
+	} else if len(metadata.SkillsAvailable) > 0 {
+		metadata.SkillDetection = SkillDetectionObservedNone
+	}
+	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool {
+		return metadata.SkillsAvailable[i].Name+"\x00"+metadata.SkillsAvailable[i].SHA256 < metadata.SkillsAvailable[j].Name+"\x00"+metadata.SkillsAvailable[j].SHA256
+	})
+	sort.Slice(metadata.SkillsUsed, func(i, j int) bool {
+		return metadata.SkillsUsed[i].Name+"\x00"+metadata.SkillsUsed[i].SHA256 < metadata.SkillsUsed[j].Name+"\x00"+metadata.SkillsUsed[j].SHA256
+	})
+}
+
+func skillNameFromPath(value string) string {
+	value = strings.ReplaceAll(value, "\\", "/")
+	marker := "/SKILL.md"
+	index := strings.Index(value, marker)
+	if index < 1 {
+		return ""
+	}
+	before := strings.TrimSuffix(value[:index], "/")
+	parts := strings.Split(before, "/")
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return ""
+	}
+	return parts[len(parts)-1]
 }
 
 // IsParseError supports the source-first publication flow.

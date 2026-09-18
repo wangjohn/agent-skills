@@ -45,6 +45,16 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 		}
 		records = append(records, record)
 	}
+	nativeText := make([]TextTranscript, 0, len(transcript.Text))
+	for _, text := range transcript.Text {
+		if text != "" {
+			nativeText = append(nativeText, TextTranscript{Format: transcript.Format, Content: text})
+		}
+	}
+	if len(records) == 0 && len(nativeText) == 0 {
+		return SourceBundle{}, errors.New("filtered transcript has no retained evidence")
+	}
+	harness := observedHarness(reg.Harness, records)
 	filteredSupplemental, gaps, err := FilterSupplementalEvidence(supplemental)
 	if err != nil {
 		return SourceBundle{}, err
@@ -56,12 +66,27 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 		NativeSessionID:  reg.NativeSessionID,
 		ProjectID:        reg.ProjectID,
 		Capture: SourceCapture{
-			Harness: reg.Harness, AdapterName: adapter.Name(), AdapterVersion: adapter.Version(),
+			Harness: harness, AdapterName: adapter.Name(), AdapterVersion: adapter.Version(),
 			SourceFormat: transcript.Format, Boundary: transcript.Boundary,
 			FilterVersion: FilterVersion, CapturedAt: capturedAt.UTC(), Gaps: allGaps,
 		},
-		NativeRecords: records, SupplementalEvidence: filteredSupplemental,
+		NativeRecords: records, NativeText: nativeText, SupplementalEvidence: filteredSupplemental,
 	}, nil
+}
+
+func observedHarness(base Harness, records []map[string]any) Harness {
+	for _, record := range records {
+		if firstString(record, "type") != "session_meta" {
+			continue
+		}
+		if version := firstStringDeep(record, "cli_version"); version != "" {
+			base.Version = version
+		}
+		if mode := firstStringDeep(record, "source"); mode != "" {
+			base.Mode = mode
+		}
+	}
+	return base
 }
 
 // FilterSupplementalEvidence applies the same strict allowlist and secret
@@ -71,7 +96,7 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 	out := make([]SupplementalEvidence, 0, len(in))
 	var gaps []CaptureGap
 	for _, evidence := range in {
-		if strings.TrimSpace(evidence.Kind) == "" || strings.TrimSpace(evidence.Provenance) == "" || evidence.ObservedAt.IsZero() {
+		if strings.TrimSpace(string(evidence.Kind)) == "" || strings.TrimSpace(evidence.Provenance) == "" || evidence.ObservedAt.IsZero() {
 			return nil, nil, errors.New("supplemental evidence requires kind, provenance, and observation time")
 		}
 		state := sanitizeState{addGap: func(code string, _ int, detail string) {
@@ -81,6 +106,9 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 		if !keep {
 			gaps = append(gaps, CaptureGap{Code: "supplemental_evidence_omitted", Detail: "no allowed fields"})
 			continue
+		}
+		if evidence.Kind == EvidenceKindFinalResponse && firstString(payload, "agent_id") != "" {
+			gaps = append(gaps, CaptureGap{Code: "subagent_final_not_reconciled", Detail: "separate subagent source required"})
 		}
 		out = append(out, SupplementalEvidence{Kind: evidence.Kind, ObservedAt: evidence.ObservedAt.UTC(), Provenance: evidence.Provenance, Payload: payload})
 	}

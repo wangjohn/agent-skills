@@ -89,17 +89,82 @@ func (CursorAdapter) FilterJSONL(r io.Reader) (FilteredTranscript, error) {
 	})
 }
 
-var sensitiveValue = regexp.MustCompile(`(?i)(?:\b(?:api[_-]?key|access[_-]?key|secret|password|authorization|bearer|token)\b\s*[=:]\s*[^\s,;]+|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{12,}\b)`)
+// FilterText retains a hook-provided Cursor text transcript only when the hook
+// has established that this is a fresh eligible session. It labels the source
+// as text rather than fabricating message events from unstructured content.
+func (CursorAdapter) FilterText(r io.Reader, freshStartedAt time.Time) (FilteredTranscript, error) {
+	if freshStartedAt.IsZero() {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no reliable fresh-session start"}
+	}
+	const maxText = 2 * 1024 * 1024
+	content, err := io.ReadAll(io.LimitReader(r, maxText+1))
+	if err != nil {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript cannot be read"}
+	}
+	if len(content) > maxText {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript exceeds safe size limit"}
+	}
+	result := FilteredTranscript{Format: "cursor-text", FirstEventAt: freshStartedAt.UTC(), Gaps: []CaptureGap{{Code: "text_structure_partial", Detail: "Cursor role sections retained without manufactured events"}}}
+	var retained []string
+	section := ""
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "system:") || strings.HasPrefix(lower, "developer:") || strings.HasPrefix(lower, "thinking:") || strings.HasPrefix(lower, "analysis:"):
+			section = "hidden"
+			result.Gaps = append(result.Gaps, CaptureGap{Code: "hidden_instruction_omitted", Detail: "text section omitted"})
+		case strings.HasPrefix(lower, "user:") || strings.HasPrefix(lower, "assistant:") || strings.HasPrefix(lower, "tool:"):
+			section = "visible"
+			retained = append(retained, line)
+		case section == "hidden":
+			// continuation line of an already-hidden section; omit.
+		case section == "visible":
+			// continuation line of the current visible section's message body.
+			retained = append(retained, line)
+		default:
+			return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has unrecognized role section"}
+		}
+	}
+	if len(retained) == 0 {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable visible sections"}
+	}
+	state := sanitizeState{addGap: func(code string, _ int, detail string) {
+		result.Gaps = append(result.Gaps, CaptureGap{Code: code, Detail: detail})
+	}}
+	safe, keep := sanitizeValue(strings.Join(retained, "\n"), &state)
+	if !keep {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript has no retainable content"}
+	}
+	text, ok := safe.(string)
+	if !ok {
+		return FilteredTranscript{}, &FilterError{Reason: "cursor text transcript is not text"}
+	}
+	result.Text = []string{text}
+	result.Boundary.RetainedBytes = len(text)
+	return result, nil
+}
+
+var sensitiveValue = regexp.MustCompile(`(?i)(?:\bauthorization\b\s*:\s*bearer\s+[^\s,;]+|\b(?:api[_-]?key|access[_-]?key|secret|password|authorization|bearer|token)\b\s*[=:]\s*[^\s,;]+|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{12,}\b)`)
 
 var allowedKeys = map[string]bool{
 	"type": true, "id": true, "uuid": true, "session_id": true, "parent_id": true,
 	"parent_uuid": true, "parentuuid": true, "timestamp": true, "created_at": true, "updated_at": true,
 	"cwd": true, "model": true, "model_provider": true, "role": true, "content": true,
-	"text": true, "message": true, "item": true, "event": true, "payload": true,
+	"channel": true,
+	"text":    true, "message": true, "item": true, "event": true, "payload": true,
 	"tool_name": true, "tool_input": true, "tool_output": true, "tool_use": true,
 	"tool_result": true, "call_id": true, "input": true, "output": true, "result": true, "arguments": true,
 	"command": true, "path": true, "query": true, "url": true, "description": true,
 	"status": true, "turn_id": true, "reasoning_effort": true, "name": true, "items": true, "data": true,
+	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
+	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
+	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
+	"skill":     true,
+	"file_path": true,
 }
 
 var blockedKeys = map[string]bool{
@@ -142,7 +207,8 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 			result.FirstEventAt = parseNativeTimestamp(raw)
 		}
 		kind, _ := raw["type"].(string)
-		if !knownTypes[kind] {
+		cursorRoleContent := format == "cursor-jsonl" && kind == "" && firstString(raw, "role") != ""
+		if !knownTypes[kind] && !cursorRoleContent {
 			addGap("unknown_record_type", lineNo, "record omitted")
 			continue
 		}
@@ -190,6 +256,10 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
 		return nil, false
 	}
+	if channel, _ := in["channel"].(string); isHiddenChannel(channel) {
+		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
+		return nil, false
+	}
 	if kind, _ := in["type"].(string); isHiddenRole(kind) {
 		state.addGap("hidden_instruction_omitted", state.record, "record omitted")
 		return nil, false
@@ -220,7 +290,23 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 		state.addGap("record_without_allowed_fields_omitted", state.record, "record omitted")
 		return nil, false
 	}
+	for _, key := range []string{"payload", "message", "item", "event"} {
+		if _, had := in[key]; had {
+			if _, kept := out[key]; !kept {
+				state.addGap("hidden_or_unknown_nested_content_omitted", state.record, "record omitted")
+				return nil, false
+			}
+		}
+	}
 	return out, true
+}
+
+func isHiddenChannel(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "analysis", "reasoning", "thinking", "chain_of_thought":
+		return true
+	}
+	return false
 }
 
 func sanitizeValue(value any, state *sanitizeState) (any, bool) {
@@ -248,6 +334,10 @@ func sanitizeValue(value any, state *sanitizeState) (any, bool) {
 				out = append(out, safe)
 			}
 		}
+		if len(v) > 0 && len(out) == 0 {
+			state.addGap("hidden_or_unknown_nested_content_omitted", state.record, "field omitted")
+			return nil, false
+		}
 		return out, true
 	default:
 		state.addGap("unsupported_value_omitted", state.record, "value omitted")
@@ -257,7 +347,7 @@ func sanitizeValue(value any, state *sanitizeState) (any, bool) {
 
 func isHiddenRole(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "system", "developer", "reasoning", "analysis", "thinking", "chain_of_thought":
+	case "system", "developer", "reasoning", "analysis", "thinking", "chain_of_thought", "agent_reasoning", "agent_reasoning_delta", "raw_agent_reasoning":
 		return true
 	default:
 		return false

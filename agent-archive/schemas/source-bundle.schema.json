@@ -26,6 +26,7 @@
       }
     },
     "native_records": {"type": "array", "items": {"type": "object"}},
+    "native_text": {"type": "array", "items": {"type":"object", "additionalProperties":false, "required":["format","content"], "properties":{"format":{"type":"string"},"content":{"type":"string"}}}},
     "supplemental_evidence": {"type": "array", "items": {"$ref": "#/$defs/supplemental"}}
   },
   "$defs": {
