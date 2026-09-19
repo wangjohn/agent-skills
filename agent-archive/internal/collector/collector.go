@@ -255,6 +255,31 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	if err := storage.PutSourceThenMetadata(ctx, store, sourceKey, metadataKey, compressed.Bytes, metadataBytes, opts.Retry); err != nil {
 		return outcomeSkipped, fmt.Errorf("publish: %w", err)
 	}
+	// A previously *actually published* bundle (not a withheld or declined
+	// one, which were never the current pointer) is now superseded. Record
+	// it for retention to delete once its grace period elapses; it must
+	// stay downloadable until then; PutSourceThenMetadata has just made the
+	// new one the current pointer.
+	//
+	// The `err == nil` guards below are a deliberate, accepted gap: if
+	// either recomputation fails, the old snapshot is silently never
+	// recorded as superseded and so never cleaned up by retention — a
+	// storage leak, not a correctness or safety issue (the new source is
+	// already the live pointer regardless). Treating it as fatal here would
+	// be worse: PutSourceThenMetadata has already succeeded, so failing
+	// this session now would report a successful publish as an error and,
+	// since local.SavePublished below would never run, leave the local
+	// cache stale — causing a real, unwanted republish loop on every future
+	// pass instead of one already-orphaned snapshot.
+	if havePrev && prevStatus == CacheStatusPublished {
+		if prevCompressed, err := archive.BuildCompressedSource(prevBundle); err == nil {
+			if prevKey, err := archive.SourceObjectKey(prevBundle, prevCompressed.SHA256); err == nil && prevKey != sourceKey {
+				if err := local.RecordSuperseded(reg.ArchiveSessionID, prevKey, now); err != nil {
+					return outcomeSkipped, fmt.Errorf("record superseded source: %w", err)
+				}
+			}
+		}
+	}
 	if err := local.SavePublished(reg.ArchiveSessionID, candidate, now, CacheStatusPublished); err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}

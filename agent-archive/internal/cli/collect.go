@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/retention"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
@@ -88,11 +90,48 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		recordPreflightError(localStore, storeErr)
 		return collector.Result{}, storeErr
 	}
-	return collector.Run(context.Background(), localStore, objectStore, collector.Options{
+	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
 		MachineID:       cfg.MachineID,
 		Now:             env.Now,
 		RequireSkillUse: cfg.RequireSkillUse,
 	})
+	if err != nil {
+		return result, err
+	}
+
+	sweepResult, sweepErr := retention.Sweep(context.Background(), localStore, objectStore, retention.Options{
+		Now:           env.Now,
+		SessionMaxAge: time.Duration(cfg.RetentionDays) * 24 * time.Hour,
+	})
+	if sweepErr != nil {
+		return result, fmt.Errorf("collection succeeded but retention cleanup failed: %w", sweepErr)
+	}
+	if len(sweepResult.Errors) > 0 {
+		recordRetentionErrors(localStore, &result, sweepResult)
+	}
+	return result, nil
+}
+
+// recordRetentionErrors merges retention.Sweep's per-session failures into
+// result, so sync's existing report/exit-code logic (which only knows about
+// collector.Result) covers them too without its own retention-specific
+// path, and updates Status.LastError the same way collector.Run already
+// does for its own per-session errors — otherwise a retention failure would
+// never reach `status` at all, since, unlike collector.Run, Sweep does not
+// persist a Status of its own.
+func recordRetentionErrors(localStore *collector.LocalStore, result *collector.Result, sweep retention.Result) {
+	if result.Errors == nil {
+		result.Errors = map[string]error{}
+	}
+	for id, sweepErr := range sweep.Errors {
+		result.Errors[id] = fmt.Errorf("retention: %w", sweepErr)
+	}
+	status, err := localStore.LoadStatus()
+	if err != nil {
+		return
+	}
+	status.LastError = fmt.Sprintf("%d session(s) failed to scan, publish, or clean up", len(result.Errors))
+	_ = localStore.SaveStatus(status)
 }
 
 // recordPreflightError persists a failure that happened before collector.Run
