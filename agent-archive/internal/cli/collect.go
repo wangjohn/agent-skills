@@ -75,9 +75,12 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 			}
 			return collector.Result{}, err
 		}
-		lockErr := fmt.Errorf("acquire lock: %w", err)
-		recordPreflightError(localStore, lockErr)
-		return collector.Result{}, lockErr
+		// Not recorded into Status here: without the lock, a concurrent
+		// holder's own SaveStatus (from collector.Run or this same
+		// function) could race an unguarded read-modify-write to
+		// status.json and lose an update. Every failure below this point
+		// runs only after the lock is held, so it can record safely.
+		return collector.Result{}, fmt.Errorf("acquire lock: %w", err)
 	}
 	defer unlock()
 

@@ -25,8 +25,17 @@ func newPrompter(in io.Reader, out io.Writer) *prompter {
 func (p *prompter) line(label string) (string, error) {
 	fmt.Fprint(p.out, label)
 	text, err := p.in.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", err
+	if err != nil {
+		if err == io.EOF && text != "" {
+			// A final answer with no trailing newline is still a real one.
+			return strings.TrimSpace(text), nil
+		}
+		// No more input at all: treated as an error, never as a silent
+		// blank. Otherwise a truncated scripted input, or a real Ctrl-D,
+		// would make every remaining prompt take its default silently —
+		// including "Enable automatic capture?", which defaults to yes —
+		// so setup could commit real changes the user never confirmed.
+		return "", fmt.Errorf("no more input: %w", err)
 	}
 	return strings.TrimSpace(text), nil
 }

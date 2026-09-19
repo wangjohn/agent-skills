@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,18 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 			fmt.Fprintf(stderr, "agent-archive: setup: keychain: %v\n", err)
 			return 1
 		}
+		// R2CredentialRef is deterministic per bucket ("r2-"+bucket), so
+		// reconfiguring the same bucket with a freshly-entered secret
+		// overwrites, not creates, when a working credential already lives
+		// under that reference. Capture whatever is there now, before the
+		// overwrite, so a failed or abandoned setup can restore it instead
+		// of deleting it outright — deleting it would destroy a previously
+		// working credential the docstring's "nothing is written until
+		// confirmation" guarantee never intended to touch.
+		priorSecret, priorErr := keychain.Load(ctx, storageCfg.R2CredentialRef)
+		hadPrior := priorErr == nil
+		priorLoadFailed := priorErr != nil && !errors.Is(priorErr, credentials.ErrMissingCredential)
+
 		if err := keychain.Save(ctx, storageCfg.R2CredentialRef, r2Secret); err != nil {
 			fmt.Fprintf(stderr, "agent-archive: setup: save R2 credentials: %v\n", err)
 			return 1
@@ -80,16 +93,28 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 		// run — the save can't simply move after VerifyAccess. Instead,
 		// this docstring's "nothing is written until confirmation"
 		// guarantee is restored here: any early return between this save
-		// and the final successful config.Save removes the credential
-		// again, so a failed or abandoned setup never leaves a fresh R2
-		// secret behind. A reused existing credential (saveSecret false)
-		// is never touched.
+		// and the final successful config.Save undoes it, so a failed or
+		// abandoned setup never leaves a fresh R2 secret behind, and never
+		// destroys a reused reference's prior working value either.
 		defer func() {
 			if credentialCommitted {
 				return
 			}
-			if delErr := keychain.Delete(ctx, storageCfg.R2CredentialRef); delErr != nil {
-				fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove uncommitted R2 credentials: %v\n", delErr)
+			switch {
+			case hadPrior:
+				if err := keychain.Save(ctx, storageCfg.R2CredentialRef, priorSecret); err != nil {
+					fmt.Fprintf(stderr, "agent-archive: setup: warning: could not restore prior R2 credentials: %v\n", err)
+				}
+			case priorLoadFailed:
+				// Could not confirm whether this reference already held a
+				// working credential; leaving it as-is (the just-written,
+				// unconfirmed secret) is safer than guessing and possibly
+				// deleting a credential that was actually there before.
+				fmt.Fprintln(stderr, "agent-archive: setup: warning: could not confirm prior R2 credential state; leaving Keychain unchanged")
+			default:
+				if delErr := keychain.Delete(ctx, storageCfg.R2CredentialRef); delErr != nil {
+					fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove uncommitted R2 credentials: %v\n", delErr)
+				}
 			}
 		}()
 	}
@@ -149,6 +174,15 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	retentionDays, err := p.intWithDefault("Retention (days)", retentionDefault)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
+		return 1
+	}
+	if retentionDays <= 0 {
+		// retention.Options.SessionMaxAge treats zero (or, from a negative
+		// duration, anything non-positive) as "disabled" — never expire —
+		// which is the opposite of what a user typing "0" here, expecting
+		// aggressive cleanup, would want. This guided flow requires a real
+		// number of days rather than silently accepting that surprise.
+		fmt.Fprintln(stderr, "agent-archive: setup: retention days must be a positive number")
 		return 1
 	}
 

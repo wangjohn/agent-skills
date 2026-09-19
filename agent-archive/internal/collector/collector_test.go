@@ -387,7 +387,11 @@ func TestEnsureArchiveSessionIDPersistsAndReuses(t *testing.T) {
 }
 
 func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
-	local := newTestStore(t)
+	home := t.TempDir()
+	local, err := NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A native session ID is harness-controlled input; it must not be usable
 	// to escape the sessions/ directory even though it is only ever hashed,
 	// not used directly as a path component.
@@ -398,7 +402,10 @@ func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
 	if id == "" {
 		t.Fatal("expected a valid archive session ID")
 	}
-	if _, err := os.Stat(filepath.Join(t.TempDir(), "..", "..", "etc", "passwd")); err == nil {
+	// Checked against home, the store's actual base directory — not some
+	// other, unrelated temp directory — so this would actually catch a
+	// future regression that built a path from the native ID directly.
+	if _, err := os.Stat(filepath.Join(home, "..", "..", "etc", "passwd")); err == nil {
 		t.Fatal("unexpected file escape")
 	}
 }
@@ -433,6 +440,47 @@ func TestRunDeclinesPublishWhenSkillUseRequiredAndAbsent(t *testing.T) {
 	}
 	if len(result.Published) != 0 || len(result.Skipped) != 1 {
 		t.Fatalf("a decline must not auto-publish later: %#v", result)
+	}
+}
+
+// TestRunDeclinedCandidateIsNotSpuriouslyRateLimitedOnLaterChange guards a
+// regression where a declined candidate was cached with PublishedAt set to
+// its capture time instead of a zero time. Since nothing was ever actually
+// published, a later genuine content change (still within the rate-limit
+// window) must not be mistaken for a retry of a real publish and withheld;
+// it should be evaluated (and, here, declined again) immediately.
+func TestRunDeclinedCandidateIsNotSpuriouslyRateLimitedOnLaterChange(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }, RequireSkillUse: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, publishedAt, status, found, err := local.LoadPublished("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || status != CacheStatusDeclined || !publishedAt.IsZero() {
+		t.Fatalf("expected a zero-time declined cache entry: found=%v status=%v publishedAt=%v", found, status, publishedAt)
+	}
+
+	writeTranscript(t, dir, "codex.jsonl", codexTranscript+"\n"+`{"type":"response_item","id":"m2","payload":{"type":"message","role":"user","content":"still no skill use"}}`)
+	t1 := t0.Add(30 * time.Second)
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t1 }, RequireSkillUse: true, MinUploadInterval: 3 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, status2, found2, err := local.LoadPublished("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found2 || status2 != CacheStatusDeclined {
+		t.Fatalf("expected an immediate re-decline, not a spurious rate limit: found=%v status=%v", found2, status2)
 	}
 }
 
