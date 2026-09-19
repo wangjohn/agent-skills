@@ -10,9 +10,11 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
@@ -32,6 +34,33 @@ type Env struct {
 	// this machine's configured storage destination. Defaults to
 	// openConfiguredStore, which resolves real AWS/R2 credentials.
 	OpenStore func(config.Config) (storage.ObjectStore, error)
+	// Executable returns the absolute path setup installs into hook
+	// commands and the LaunchAgent. Defaults to os.Executable.
+	Executable func() (string, error)
+	// UserHomeDir is the real user home directory — where hook config files
+	// and ~/Library/LaunchAgents live — as distinct from Home, which is
+	// agent-archive's own (possibly redirected) private data directory.
+	// Defaults to os.UserHomeDir.
+	UserHomeDir func() (string, error)
+	// DetectHarnesses best-effort detects which applications appear
+	// installed under a user home directory, to pre-select setup's
+	// application prompts; the user can still include or exclude any of
+	// them regardless of what this reports. Defaults to detectHarnesses.
+	DetectHarnesses func(userHome string) []string
+	// LoadLaunchAgent loads the just-written LaunchAgent plist so scheduled
+	// collection starts without a login/logout cycle. Defaults to shelling
+	// out to launchctl; unverified against a real launchd (see the
+	// implementation ledger).
+	LoadLaunchAgent func(plistPath string) error
+	// UnloadLaunchAgent undoes a successful LoadLaunchAgent, used only to
+	// roll setup back if a later step (config.Save) fails after the
+	// LaunchAgent was already loaded. Defaults to shelling out to
+	// launchctl; unverified against a real launchd, same as LoadLaunchAgent.
+	UnloadLaunchAgent func(plistPath string) error
+	// Keychain opens the credential store setup saves R2 secrets to.
+	// Defaults to credentials.NewKeychainStore, which is only available on
+	// a darwin+cgo build.
+	Keychain func() (credentials.CredentialStore, error)
 }
 
 func (e Env) home() (string, error) {
@@ -53,6 +82,48 @@ func (e Env) openStore(cfg config.Config) (storage.ObjectStore, error) {
 		return e.OpenStore(cfg)
 	}
 	return openConfiguredStore(cfg)
+}
+
+func (e Env) executable() (string, error) {
+	if e.Executable != nil {
+		return e.Executable()
+	}
+	return os.Executable()
+}
+
+func (e Env) userHomeDir() (string, error) {
+	if e.UserHomeDir != nil {
+		return e.UserHomeDir()
+	}
+	return os.UserHomeDir()
+}
+
+func (e Env) detectHarnesses(userHome string) []string {
+	if e.DetectHarnesses != nil {
+		return e.DetectHarnesses(userHome)
+	}
+	return detectHarnesses(userHome)
+}
+
+func (e Env) loadLaunchAgent(plistPath string) error {
+	if e.LoadLaunchAgent != nil {
+		return e.LoadLaunchAgent(plistPath)
+	}
+	return loadLaunchAgent(plistPath)
+}
+
+func (e Env) unloadLaunchAgent(plistPath string) error {
+	if e.UnloadLaunchAgent != nil {
+		return e.UnloadLaunchAgent(plistPath)
+	}
+	return unloadLaunchAgent(plistPath)
+}
+
+func (e Env) keychain() (credentials.CredentialStore, error) {
+	if e.Keychain != nil {
+		return e.Keychain()
+	}
+	return credentials.NewKeychainStore(credentials.KeychainService)
 }
 
 const usage = `agent-archive manages a private, local-first archive of coding-agent

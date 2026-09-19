@@ -209,43 +209,59 @@ func (s *LocalStore) CompleteRequest(archiveSessionID string) error {
 	return nil
 }
 
-// publishedState is the small local cache of what was last successfully
-// published for a session: the exact source bundle (so a later scan can
-// detect "no meaningful change" without redownloading or reparsing
-// published history) and when it was published (so the collector can
-// enforce its minimum upload interval per session).
+// CacheStatus distinguishes why a bundle sits in the local published cache,
+// since only some of those reasons should be auto-retried once time passes.
+type CacheStatus string
+
+const (
+	// CacheStatusPublished means this exact bundle was actually published.
+	CacheStatusPublished CacheStatus = "published"
+	// CacheStatusRateLimited means this bundle was built and differs from
+	// what's published, but was withheld by the minimum upload interval; it
+	// is eligible to auto-publish once that interval elapses.
+	CacheStatusRateLimited CacheStatus = "rate_limited"
+	// CacheStatusDeclined means this bundle was deliberately not published
+	// by policy (see Options.RequireSkillUse), not by cadence. Unlike
+	// CacheStatusRateLimited, it must never auto-publish just because time
+	// passed — only a genuine further content change reconsiders it.
+	CacheStatusDeclined CacheStatus = "declined"
+)
+
+// publishedState is the small local cache of what was last built for a
+// session: the exact source bundle (so a later scan can detect "no
+// meaningful change" without redownloading or reparsing published history),
+// when that happened, and why the bundle is in the state it's in.
 type publishedState struct {
-	Bundle        archive.SourceBundle `json:"bundle"`
-	PublishedAt   time.Time            `json:"published_at"`
-	CandidateOnly bool                 `json:"candidate_only,omitempty"`
+	Bundle      archive.SourceBundle `json:"bundle"`
+	PublishedAt time.Time            `json:"published_at"`
+	Status      CacheStatus          `json:"status"`
 }
 
 func (s *LocalStore) publishedPath(archiveSessionID string) string {
 	return filepath.Join(s.home, "published", archiveSessionID+".json")
 }
 
-// SavePublished records the bundle that was just successfully published (or,
-// with candidateOnly set, a bundle that was built but withheld by the
-// minimum upload interval — so the next scan compares against it instead of
-// rebuilding from scratch, without treating it as actually published).
-func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, candidateOnly bool) error {
+// SavePublished records the outcome of a build/publish decision for a
+// session, so the next scan can compare against it instead of rebuilding
+// from scratch. See CacheStatus for what each status means for retry.
+func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
-	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, CandidateOnly: candidateOnly})
+	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status})
 }
 
 // LoadPublished returns the last cached bundle for a session, if any.
-func (s *LocalStore) LoadPublished(archiveSessionID string) (bundle archive.SourceBundle, publishedAt time.Time, candidateOnly, found bool, err error) {
+func (s *LocalStore) LoadPublished(archiveSessionID string) (bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, found bool, err error) {
 	var state publishedState
 	readErr := local.Read(s.publishedPath(archiveSessionID), &state)
 	if errors.Is(readErr, os.ErrNotExist) {
-		return archive.SourceBundle{}, time.Time{}, false, false, nil
+		return archive.SourceBundle{}, time.Time{}, "", false, nil
 	}
 	if readErr != nil {
-		return archive.SourceBundle{}, time.Time{}, false, false, fmt.Errorf("read published state %q: %w", archiveSessionID, readErr)
+		return archive.SourceBundle{}, time.Time{}, "", false, fmt.Errorf("read published state %q: %w", archiveSessionID, readErr)
 	}
-	return state.Bundle, state.PublishedAt, state.CandidateOnly, true, nil
+	return state.Bundle, state.PublishedAt, state.Status, true, nil
 }
 
 // Status summarizes the collector's local state for a future `status`

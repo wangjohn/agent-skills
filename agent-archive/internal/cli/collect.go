@@ -88,7 +88,11 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		recordPreflightError(localStore, storeErr)
 		return collector.Result{}, storeErr
 	}
-	return collector.Run(context.Background(), localStore, objectStore, collector.Options{MachineID: cfg.MachineID, Now: env.Now})
+	return collector.Run(context.Background(), localStore, objectStore, collector.Options{
+		MachineID:       cfg.MachineID,
+		Now:             env.Now,
+		RequireSkillUse: cfg.RequireSkillUse,
+	})
 }
 
 // recordPreflightError persists a failure that happened before collector.Run

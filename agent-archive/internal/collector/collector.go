@@ -27,6 +27,11 @@ type Options struct {
 	// MinUploadInterval bounds how often one session may be republished.
 	// Defaults to three minutes, matching the spec's cadence.
 	MinUploadInterval time.Duration
+	// RequireSkillUse, when true, skips publishing a session that has no
+	// detected skill use. The spec's default is to capture such sessions
+	// anyway (to preserve comparison evidence), so the zero value (false)
+	// matches that default rather than requiring every caller to opt in.
+	RequireSkillUse bool
 }
 
 func (o Options) now() time.Time {
@@ -155,7 +160,7 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		return outcomeSkipped, fmt.Errorf("close transcript: %w", closeErr)
 	}
 
-	prevBundle, prevPublishedAt, prevCandidateOnly, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
+	prevBundle, prevPublishedAt, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("load published cache: %w", err)
 	}
@@ -183,18 +188,20 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// to a still-pending rate-limited candidate: this is a new snapshot,
 		// first observed now.
 		candidate.Capture.CapturedAt = now
-	case prevCandidateOnly:
+	case prevStatus == CacheStatusRateLimited:
 		// Unchanged since the last withheld candidate: it is the same
 		// pending snapshot, so reuse its already-assigned capture time
 		// rather than manufacturing a new one on every retry.
 		candidate.Capture.CapturedAt = prevBundle.Capture.CapturedAt
 	default:
-		// Unchanged since the last actual publish: nothing to do.
+		// Unchanged since the last actual publish, or since a policy
+		// decline: nothing to do. A decline is reconsidered only by a
+		// genuine further content change, never by time alone.
 		return outcomeSkipped, nil
 	}
 
 	if !prevPublishedAt.IsZero() && now.Sub(prevPublishedAt) < opts.minUploadInterval() {
-		if err := local.SavePublished(reg.ArchiveSessionID, candidate, prevPublishedAt, true); err != nil {
+		if err := local.SavePublished(reg.ArchiveSessionID, candidate, prevPublishedAt, CacheStatusRateLimited); err != nil {
 			return outcomeSkipped, fmt.Errorf("cache rate-limited candidate: %w", err)
 		}
 		return outcomeRateLimited, nil
@@ -220,7 +227,26 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	}
 	// A ParseError here still yields a minimal, safe-to-publish metadata
 	// document with parser.status "failed", per the spec's failure table:
-	// archive the filtered source and retry parsing later.
+	// archive the filtered source and retry parsing later. A ParseError
+	// also means metadata.SkillsUsed is necessarily empty (parsing never
+	// got far enough to derive it), so RequireSkillUse must not read that
+	// as "no skill use" and decline the session — that would silently and
+	// permanently skip every session whose transcript fails to parse,
+	// contradicting the comment above and the failure table it cites.
+	parseFailed := archive.IsParseError(buildErr)
+
+	if opts.RequireSkillUse && !parseFailed && len(metadata.SkillsUsed) == 0 {
+		// Nothing was ever actually published, so this candidate carries no
+		// real publish history; a zero PublishedAt correctly signals that
+		// to the rate-limit check above once this decline is reconsidered
+		// by a later content change, rather than a manufactured timestamp
+		// making a genuinely-first publish look rate-limited.
+		if err := local.SavePublished(reg.ArchiveSessionID, candidate, time.Time{}, CacheStatusDeclined); err != nil {
+			return outcomeSkipped, fmt.Errorf("cache declined candidate: %w", err)
+		}
+		return outcomeSkipped, nil
+	}
+
 	metadataBytes, err := json.Marshal(metadata)
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("marshal metadata: %w", err)
@@ -229,7 +255,7 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	if err := storage.PutSourceThenMetadata(ctx, store, sourceKey, metadataKey, compressed.Bytes, metadataBytes, opts.Retry); err != nil {
 		return outcomeSkipped, fmt.Errorf("publish: %w", err)
 	}
-	if err := local.SavePublished(reg.ArchiveSessionID, candidate, now, false); err != nil {
+	if err := local.SavePublished(reg.ArchiveSessionID, candidate, now, CacheStatusPublished); err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}
 	return outcomePublished, nil

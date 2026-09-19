@@ -29,6 +29,18 @@ type Config struct {
 	// Paused persistently suspends collection, uploads, and remote cleanup
 	// without deleting data or existing configuration.
 	Paused bool `json:"paused"`
+	// Harnesses lists which applications setup installed hooks for
+	// (values match archive.Harness.Name: "codex", "claude", "cursor").
+	Harnesses []string `json:"harnesses,omitempty"`
+	// RequireSkillUse opts out of the spec's default (capture sessions with
+	// no detected skill use too, to preserve comparison evidence). The zero
+	// value (false) matches that default, so a config that predates this
+	// field, or one built without setting it, behaves correctly rather than
+	// silently declining everything.
+	RequireSkillUse bool `json:"require_skill_use"`
+	// RetentionDays is whole-session retention, proposed as 90 by setup.
+	// Enforcing it is the Retention slice's job, not this package's.
+	RetentionDays int `json:"retention_days"`
 }
 
 func path(home string) string { return filepath.Join(home, "config.json") }
