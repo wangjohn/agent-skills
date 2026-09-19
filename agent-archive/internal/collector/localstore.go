@@ -39,7 +39,7 @@ func NewLocalStore(home string) (*LocalStore, error) {
 	if strings.TrimSpace(home) == "" {
 		return nil, errors.New("local store home is required")
 	}
-	for _, dir := range []string{"registrations", "requests", "published"} {
+	for _, dir := range []string{"registrations", "requests", "published", "sessions"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			return nil, fmt.Errorf("create local store directory %q: %w", dir, err)
 		}
@@ -91,6 +91,19 @@ func (s *LocalStore) LoadRegistrations() ([]archive.SessionRegistration, error) 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ArchiveSessionID < out[j].ArchiveSessionID })
 	return out, nil
+}
+
+// LoadRegistration returns one session's registration, if it has been saved.
+func (s *LocalStore) LoadRegistration(archiveSessionID string) (archive.SessionRegistration, bool, error) {
+	var reg archive.SessionRegistration
+	err := local.Read(s.registrationPath(archiveSessionID), &reg)
+	if errors.Is(err, os.ErrNotExist) {
+		return archive.SessionRegistration{}, false, nil
+	}
+	if err != nil {
+		return archive.SessionRegistration{}, false, fmt.Errorf("read registration %q: %w", archiveSessionID, err)
+	}
+	return reg, true, nil
 }
 
 // Request is a small durable marker left by a stop, failure, or end hook. It

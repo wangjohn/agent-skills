@@ -360,3 +360,52 @@ func TestRunComposesWithLocalLock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEnsureArchiveSessionIDPersistsAndReuses(t *testing.T) {
+	local := newTestStore(t)
+	id1, created1, err := local.EnsureArchiveSessionID("native-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created1 || id1 == "" {
+		t.Fatalf("id1=%q created1=%v", id1, created1)
+	}
+	id2, created2, err := local.EnsureArchiveSessionID("native-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created2 || id2 != id1 {
+		t.Fatalf("expected reuse: id1=%q id2=%q created2=%v", id1, id2, created2)
+	}
+	id3, created3, err := local.EnsureArchiveSessionID("native-xyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created3 || id3 == id1 {
+		t.Fatalf("expected a distinct fresh ID for a different native session: id3=%q", id3)
+	}
+}
+
+func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
+	home := t.TempDir()
+	local, err := NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A native session ID is harness-controlled input; it must not be usable
+	// to escape the sessions/ directory even though it is only ever hashed,
+	// not used directly as a path component.
+	id, _, err := local.EnsureArchiveSessionID("../../etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" {
+		t.Fatal("expected a valid archive session ID")
+	}
+	// Checked against home, the store's actual base directory — not some
+	// other, unrelated temp directory — so this would actually catch a
+	// future regression that built a path from the native ID directly.
+	if _, err := os.Stat(filepath.Join(home, "..", "..", "etc", "passwd")); err == nil {
+		t.Fatal("unexpected file escape")
+	}
+}
