@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 func writeCodexTranscript(t *testing.T, dir string) string {
@@ -169,5 +171,31 @@ func TestStatusShowsNotSetUp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Not set up") {
 		t.Fatalf("out=%s", out.String())
+	}
+}
+
+func TestCollectCommandRecordsPreflightFailureInStatus(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	env := testEnv(t, home, time.Now())
+	openErr := errors.New("simulated broken storage credentials")
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return nil, openErr }
+
+	var out, errOut bytes.Buffer
+	if code := runCollectCommand(nil, &out, &errOut, env); code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+
+	store, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.LoadStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status.LastError, openErr.Error()) {
+		t.Fatalf("expected status.LastError to record the preflight failure, got %q", status.LastError)
 	}
 }

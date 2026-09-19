@@ -37,6 +37,13 @@ func runCollectCommand(_ []string, _ io.Writer, stderr io.Writer, env Env) int {
 // runOnePass loads configuration, honors pause, takes the machine lock, and
 // runs one collector.Run pass. quietOnBusy controls whether a contended lock
 // is reported as an error or treated as an expected, silent no-op.
+//
+// Once localStore exists, any failure before collector.Run gets its own
+// chance to record Status is written into that same Status's LastError.
+// Without this, a broken lock or bad storage credentials would fail every
+// scheduled _collect tick while `status` kept reporting the last successful
+// scan's LastError (typically empty), leaving a misconfigured install
+// looking healthy.
 func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	home, err := env.home()
 	if err != nil {
@@ -52,6 +59,12 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if cfg.Paused {
 		return collector.Result{}, errPaused
 	}
+
+	localStore, err := collector.NewLocalStore(home)
+	if err != nil {
+		return collector.Result{}, fmt.Errorf("open local store: %w", err)
+	}
+
 	unlock, err := local.Lock(home)
 	if err != nil {
 		if errors.Is(err, local.ErrBusy) {
@@ -60,23 +73,36 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 			}
 			return collector.Result{}, err
 		}
-		return collector.Result{}, fmt.Errorf("acquire lock: %w", err)
+		lockErr := fmt.Errorf("acquire lock: %w", err)
+		recordPreflightError(localStore, lockErr)
+		return collector.Result{}, lockErr
 	}
 	defer unlock()
 
-	localStore, err := collector.NewLocalStore(home)
-	if err != nil {
-		return collector.Result{}, fmt.Errorf("open local store: %w", err)
-	}
 	objectStore, err := env.openStore(cfg)
 	if err != nil {
-		return collector.Result{}, fmt.Errorf("open storage: %w", err)
+		storeErr := fmt.Errorf("open storage: %w", err)
+		recordPreflightError(localStore, storeErr)
+		return collector.Result{}, storeErr
 	}
 	return collector.Run(context.Background(), localStore, objectStore, collector.Options{
 		MachineID:       cfg.MachineID,
 		Now:             env.Now,
 		RequireSkillUse: cfg.RequireSkillUse,
 	})
+}
+
+// recordPreflightError persists a failure that happened before collector.Run
+// could record its own Status, so `status` reflects it. Best-effort: if the
+// status write itself fails, the original error is still what the caller
+// returns and reports.
+func recordPreflightError(localStore *collector.LocalStore, preflightErr error) {
+	status, err := localStore.LoadStatus()
+	if err != nil {
+		return
+	}
+	status.LastError = preflightErr.Error()
+	_ = localStore.SaveStatus(status)
 }
 
 // openConfiguredStore resolves cfg.Storage into a live ObjectStore. A
