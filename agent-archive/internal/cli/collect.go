@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/retention"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
@@ -72,11 +74,22 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if err != nil {
 		return collector.Result{}, fmt.Errorf("open storage: %w", err)
 	}
-	return collector.Run(context.Background(), localStore, objectStore, collector.Options{
+	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
 		MachineID:       cfg.MachineID,
 		Now:             env.Now,
 		RequireSkillUse: cfg.RequireSkillUse,
 	})
+	if err != nil {
+		return result, err
+	}
+
+	if _, sweepErr := retention.Sweep(context.Background(), localStore, objectStore, retention.Options{
+		Now:           env.Now,
+		SessionMaxAge: time.Duration(cfg.RetentionDays) * 24 * time.Hour,
+	}); sweepErr != nil {
+		return result, fmt.Errorf("collection succeeded but retention cleanup failed: %w", sweepErr)
+	}
+	return result, nil
 }
 
 // openConfiguredStore resolves cfg.Storage into a live ObjectStore. A

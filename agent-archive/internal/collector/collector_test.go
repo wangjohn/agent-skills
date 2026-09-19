@@ -435,3 +435,38 @@ func TestRunDeclinesPublishWhenSkillUseRequiredAndAbsent(t *testing.T) {
 		t.Fatalf("a decline must not auto-publish later: %#v", result)
 	}
 }
+
+func TestRunRecordsSupersededSourceOnRepublish(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil {
+		t.Fatal(err)
+	}
+	firstMetadata := fetchMetadata(t, store, "codex", "session-1")
+
+	// Republish with new content well past the rate limit, so it actually
+	// supersedes the first snapshot.
+	writeTranscript(t, dir, "codex.jsonl", codexTranscript+"\n"+`{"type":"response_item","id":"m2","payload":{"type":"message","role":"user","content":"more"}}`)
+	t1 := t0.Add(10 * time.Minute)
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t1 }}); err != nil {
+		t.Fatal(err)
+	}
+
+	superseded, err := local.LoadSuperseded("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(superseded) != 1 || superseded[0].Key != firstMetadata.SourceBundle.Key || !superseded[0].SupersededAt.Equal(t1) {
+		t.Fatalf("superseded=%#v firstKey=%q", superseded, firstMetadata.SourceBundle.Key)
+	}
+	// The superseded object must still exist in storage (grace period).
+	if _, err := store.Get(context.Background(), firstMetadata.SourceBundle.Key); err != nil {
+		t.Fatalf("superseded source must remain until retention deletes it: %v", err)
+	}
+}

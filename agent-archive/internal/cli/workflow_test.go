@@ -11,6 +11,7 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 func writeCodexTranscript(t *testing.T, dir string) string {
@@ -169,5 +170,61 @@ func TestStatusShowsNotSetUp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Not set up") {
 		t.Fatalf("out=%s", out.String())
+	}
+}
+
+func TestSyncRunsRetentionSweepAndDeletesExpiredSession(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	setUpTestConfig(t, home, dir, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	// setUpTestConfig doesn't set RetentionDays; give it a short window here.
+	cfg, _, err := config.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RetentionDays = 1
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	transcript := writeCodexTranscript(t, dir)
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	if err := handleHookEvent(home, "codex", payload, now); err != nil {
+		t.Fatal(err)
+	}
+
+	var mem *storage.MemoryStore
+	env := testEnv(t, home, now)
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		if mem == nil {
+			mem = storage.NewMemoryStore()
+		}
+		return mem, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runSyncCommand(nil, &stdout, &stderr, env); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+
+	// Two days later, well past the 1-day retention window.
+	later := now.Add(48 * time.Hour)
+	env2 := env
+	env2.Now = func() time.Time { return later }
+	stdout.Reset()
+	stderr.Reset()
+	if code := runSyncCommand(nil, &stdout, &stderr, env2); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+
+	store, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regs, err := store.LoadRegistrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(regs) != 0 {
+		t.Fatalf("expected the session to have aged out: %#v", regs)
 	}
 }

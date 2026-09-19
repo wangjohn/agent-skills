@@ -244,6 +244,20 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	if err := storage.PutSourceThenMetadata(ctx, store, sourceKey, metadataKey, compressed.Bytes, metadataBytes, opts.Retry); err != nil {
 		return outcomeSkipped, fmt.Errorf("publish: %w", err)
 	}
+	// A previously *actually published* bundle (not a withheld or declined
+	// one, which were never the current pointer) is now superseded. Record
+	// it for retention to delete once its grace period elapses; it must
+	// stay downloadable until then; PutSourceThenMetadata has just made the
+	// new one the current pointer.
+	if havePrev && prevStatus == CacheStatusPublished {
+		if prevCompressed, err := archive.BuildCompressedSource(prevBundle); err == nil {
+			if prevKey, err := archive.SourceObjectKey(prevBundle, prevCompressed.SHA256); err == nil && prevKey != sourceKey {
+				if err := local.RecordSuperseded(reg.ArchiveSessionID, prevKey, now); err != nil {
+					return outcomeSkipped, fmt.Errorf("record superseded source: %w", err)
+				}
+			}
+		}
+	}
 	if err := local.SavePublished(reg.ArchiveSessionID, candidate, now, CacheStatusPublished); err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}
