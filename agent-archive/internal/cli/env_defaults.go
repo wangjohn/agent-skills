@@ -39,3 +39,15 @@ func loadLaunchAgent(plistPath string) error {
 	}
 	return nil
 }
+
+// unloadLaunchAgent undoes a successful loadLaunchAgent, used only to roll
+// setup back if a later step fails after the LaunchAgent was already
+// loaded. Like loadLaunchAgent, unverified against a real launchd.
+func unloadLaunchAgent(plistPath string) error {
+	cmd := exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), plistPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl bootout: %w: %s", err, output)
+	}
+	return nil
+}

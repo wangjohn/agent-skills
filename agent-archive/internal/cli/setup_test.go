@@ -13,6 +13,8 @@ import (
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
@@ -300,5 +302,162 @@ func TestSetupR2SavesSecretAndReusesOnReconfigure(t *testing.T) {
 	stillSaved, err := keychain.Load(context.Background(), cfg.Storage.R2CredentialRef)
 	if err != nil || stillSaved.SecretAccessKey != "supersecret" {
 		t.Fatalf("expected the R2 secret to survive reconfiguration unchanged: %#v err=%v", stillSaved, err)
+	}
+}
+
+func TestSetupR2VerificationFailureRemovesFreshlySavedSecret(t *testing.T) {
+	home := t.TempDir()
+	userHome := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	keychain := newFakeKeychain()
+	env := setupTestEnv(t, home, userHome, keychain, now)
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		return nil, errors.New("storage unavailable")
+	}
+
+	r2Input := strings.Join([]string{
+		"1", "r2-bucket", "account123", "", "", // provider, bucket, account id, endpoint(blank), prefix(default)
+		"AKIAEXAMPLE", "supersecret", // access key id, secret
+		"y", "n", "n",
+		"/work/widget", "",
+		"y", "",
+		"y",
+	}, "\n") + "\n"
+	var stdout, stderr bytes.Buffer
+	code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("a failed verification must not leave a config behind")
+	}
+	if _, err := keychain.Load(context.Background(), "r2-r2-bucket"); !errors.Is(err, credentials.ErrMissingCredential) {
+		t.Fatalf("expected the freshly-saved R2 secret to be removed on verification failure, got saved=%v", err)
+	}
+}
+
+func TestSetupR2ReusedSecretSurvivesALaterVerificationFailure(t *testing.T) {
+	home := t.TempDir()
+	userHome := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	keychain := newFakeKeychain()
+	env := setupTestEnv(t, home, userHome, keychain, now)
+
+	r2Input := strings.Join([]string{
+		"1", "r2-bucket", "account123", "", "",
+		"AKIAEXAMPLE", "supersecret",
+		"y", "n", "n",
+		"/work/widget", "",
+		"y", "",
+		"y",
+	}, "\n") + "\n"
+	var stdout, stderr bytes.Buffer
+	if code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env); code != 0 {
+		t.Fatalf("first setup failed: code=%d stderr=%s", code, stderr.String())
+	}
+
+	// Reconfigure, keeping the existing secret, but let verification fail
+	// this time. Since saveSecret is false (the secret is reused, not
+	// freshly written), rollback must never touch it.
+	env2 := setupTestEnv(t, home, userHome, keychain, now)
+	env2.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		return nil, errors.New("storage unavailable")
+	}
+	reconfigureInput := strings.Join([]string{
+		"1", "r2-bucket", "account123", "", "",
+		"y", // keep existing R2 credentials
+		"y", "n", "n",
+		"y", "",
+		"y", "",
+		"y",
+	}, "\n") + "\n"
+	stdout.Reset()
+	stderr.Reset()
+	code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env2)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	saved, err := keychain.Load(context.Background(), "r2-r2-bucket")
+	if err != nil || saved.SecretAccessKey != "supersecret" {
+		t.Fatalf("expected the reused R2 secret to survive a later verification failure: saved=%#v err=%v", saved, err)
+	}
+}
+
+func TestRollbackHooksAndLaunchAgentUndoesInstalledState(t *testing.T) {
+	userHome := t.TempDir()
+	executable := "/opt/agent-archive/bin/agent-archive"
+	changes, err := hooks.Plan(userHome, executable, []string{"codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.Apply(changes); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(userHome, ".codex", "hooks.json")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("expected the hook installed before rollback: %v", err)
+	}
+
+	plist, err := hooks.LaunchAgent(executable, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
+	if err := local.WriteBytes(plistPath, plist); err != nil {
+		t.Fatal(err)
+	}
+
+	unloaded := false
+	env := Env{UnloadLaunchAgent: func(p string) error {
+		if p != plistPath {
+			t.Fatalf("unload called with %q, want %q", p, plistPath)
+		}
+		unloaded = true
+		return nil
+	}}
+
+	var stderr bytes.Buffer
+	rollbackHooksAndLaunchAgent(env, &stderr, changes, plistPath, true)
+
+	if !unloaded {
+		t.Fatal("expected the LaunchAgent to be unloaded")
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the plist to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(hookPath); err == nil {
+		t.Fatal("expected the hook to be rolled back")
+	}
+}
+
+func TestRollbackHooksAndLaunchAgentSkipsUnloadWhenNeverLoaded(t *testing.T) {
+	userHome := t.TempDir()
+	executable := "/opt/agent-archive/bin/agent-archive"
+	changes, err := hooks.Plan(userHome, executable, []string{"codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.Apply(changes); err != nil {
+		t.Fatal(err)
+	}
+
+	plist, err := hooks.LaunchAgent(executable, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
+	if err := local.WriteBytes(plistPath, plist); err != nil {
+		t.Fatal(err)
+	}
+
+	env := Env{UnloadLaunchAgent: func(string) error {
+		t.Fatal("unload must not be called when the LaunchAgent was never successfully loaded")
+		return nil
+	}}
+	var stderr bytes.Buffer
+	rollbackHooksAndLaunchAgent(env, &stderr, changes, plistPath, false)
+
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the plist to still be removed, stat err=%v", err)
 	}
 }
