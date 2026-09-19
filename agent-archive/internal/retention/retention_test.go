@@ -238,3 +238,46 @@ func TestSweepIsolatesOneSessionsFailure(t *testing.T) {
 		t.Fatalf("session b should still have been cleaned up: %#v", result)
 	}
 }
+
+// TestSweepAbortsSessionWhenCurrentSourceKeyCannotBeRecomputed guards the
+// "never delete a currently referenced object" guarantee against a silently
+// empty currentKey: if recomputing it fails, this must abort the session's
+// sweep (isolated, retried next pass) rather than proceed as if nothing
+// were current, which would let the "never delete current" check below be
+// defeated for a stale-but-still-superseded-ledger key that happens to
+// match the real current one.
+func TestSweepAbortsSessionWhenCurrentSourceKeyCannotBeRecomputed(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestStore(t)
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	firstKey := publishTwice(t, local, store, "s1", dir, t0)
+
+	// Corrupt the cached "current" bundle so recomputing its source key
+	// fails deterministically. Real registrations never produce an unsafe
+	// ArchiveSessionID (it's generated internally, not harness input); this
+	// simulates an unexpected failure in that recomputation step itself.
+	bundle, publishedAt, status, found, err := local.LoadPublished("s1")
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	bundle.ArchiveSessionID = "unsafe/id"
+	if err := local.SavePublished("s1", bundle, publishedAt, status); err != nil {
+		t.Fatal(err)
+	}
+
+	later := t0.Add(10*time.Minute + 25*time.Hour) // past the grace period
+	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return later }, GracePeriod: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result.Errors["s1"]; !ok {
+		t.Fatalf("expected the session to report an error rather than silently proceed: %#v", result)
+	}
+	if result.DeletedSnapshots != 0 {
+		t.Fatalf("must not delete anything when the current source key could not be confirmed: %#v", result)
+	}
+	if _, err := store.Get(context.Background(), firstKey); err != nil {
+		t.Fatalf("the superseded (and possibly-current) source must survive when the safety check itself fails: %v", err)
+	}
+}

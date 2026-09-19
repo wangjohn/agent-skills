@@ -103,7 +103,7 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if !found || !cfg.Archive.Enabled {
+	if !found || !cfg.Archive.Enabled || cfg.Paused {
 		return nil
 	}
 	store, err := collector.NewLocalStore(home)

@@ -100,8 +100,22 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 
 	var currentKey string
 	if found && status == collector.CacheStatusPublished {
-		if compressed, err := archive.BuildCompressedSource(bundle); err == nil {
-			currentKey, _ = archive.SourceObjectKey(bundle, compressed.SHA256)
+		// If either of these fails, currentKey must not silently stay "":
+		// the loop below treats a non-matching currentKey as "not the
+		// current source," so an empty one would defeat the "never delete
+		// the currently referenced object" guard below instead of just
+		// skipping the delete. Both calls are deterministic recomputations
+		// of a bundle that was already successfully published, so a
+		// failure here means something is genuinely wrong; abort this
+		// session's sweep (isolated by the caller, retried next pass)
+		// rather than risk deleting a live source.
+		compressed, err := archive.BuildCompressedSource(bundle)
+		if err != nil {
+			return fmt.Errorf("recompute current source key: %w", err)
+		}
+		currentKey, err = archive.SourceObjectKey(bundle, compressed.SHA256)
+		if err != nil {
+			return fmt.Errorf("recompute current source key: %w", err)
 		}
 	}
 	for _, s := range superseded {

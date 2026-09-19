@@ -461,3 +461,101 @@ func TestRollbackHooksAndLaunchAgentSkipsUnloadWhenNeverLoaded(t *testing.T) {
 		t.Fatalf("expected the plist to still be removed, stat err=%v", err)
 	}
 }
+
+func TestSetupReconfigureWithNewSecretRestoresPriorOnVerificationFailure(t *testing.T) {
+	home := t.TempDir()
+	userHome := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	keychain := newFakeKeychain()
+	env := setupTestEnv(t, home, userHome, keychain, now)
+
+	r2Input := strings.Join([]string{
+		"1", "r2-bucket", "account123", "", "",
+		"AKIAEXAMPLE", "supersecret",
+		"y", "n", "n",
+		"/work/widget", "",
+		"y", "",
+		"y",
+	}, "\n") + "\n"
+	var stdout, stderr bytes.Buffer
+	if code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env); code != 0 {
+		t.Fatalf("first setup failed: code=%d stderr=%s", code, stderr.String())
+	}
+
+	// Reconfigure with a freshly-entered secret (declining "keep existing"),
+	// but let verification fail this time. The prior, working secret must
+	// survive: it must never be deleted just because the new one failed.
+	env2 := setupTestEnv(t, home, userHome, keychain, now)
+	env2.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		return nil, errors.New("storage unavailable")
+	}
+	reconfigureInput := strings.Join([]string{
+		"1", "r2-bucket", "account123", "", "",
+		"n", // do not keep the existing credentials
+		"AKIANEW", "newsecret",
+		"y", "n", "n",
+		"y", "",
+		"y", "",
+		"y",
+	}, "\n") + "\n"
+	stdout.Reset()
+	stderr.Reset()
+	code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env2)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	saved, err := keychain.Load(context.Background(), "r2-r2-bucket")
+	if err != nil {
+		t.Fatalf("expected the prior R2 credential to survive, got err=%v", err)
+	}
+	if saved.AccessKeyID != "AKIAEXAMPLE" || saved.SecretAccessKey != "supersecret" {
+		t.Fatalf("expected the prior credential restored, not the failed new one: saved=%#v", saved)
+	}
+}
+
+func TestSetupRejectsTruncatedInputInsteadOfDefaultingSilently(t *testing.T) {
+	home := t.TempDir()
+	userHome := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
+
+	full := s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget")
+	// Cut off well before the final "Enable automatic capture?" prompt,
+	// with no trailing newline: a truncated scripted input, or a real
+	// Ctrl-D partway through.
+	truncated := full[:len(full)/2]
+	var stdout, stderr bytes.Buffer
+	code := runSetupCommand(nil, strings.NewReader(truncated), &stdout, &stderr, env)
+	if code != 1 {
+		t.Fatalf("expected truncated input to fail, not silently take every default: code=%d stdout=%s", code, stdout.String())
+	}
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("truncated input must not result in a committed setup")
+	}
+}
+
+func TestSetupRejectsNonPositiveRetentionDays(t *testing.T) {
+	home := t.TempDir()
+	userHome := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
+
+	input := strings.Join([]string{
+		"2", "test-bucket", "us-east-1", "test-profile", "",
+		"y", "n", "n",
+		"/work/widget", "",
+		"y", "0", // capture-without-skill-use=yes, retention=0
+		"y",
+	}, "\n") + "\n"
+	var stdout, stderr bytes.Buffer
+	code := runSetupCommand(nil, strings.NewReader(input), &stdout, &stderr, env)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "retention days must be a positive number") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("rejecting retention days must not leave a config behind")
+	}
+}
