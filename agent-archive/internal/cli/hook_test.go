@@ -210,6 +210,38 @@ func TestHandleHookEventNoopWhenNotConfigured(t *testing.T) {
 	}
 }
 
+// TestHandleHookEventNoopWhilePaused guards the spec's "Hooks perform no new
+// registrations while paused" requirement: pause must stop new tracking at
+// the hook, not just at collection/upload time.
+func TestHandleHookEventNoopWhilePaused(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if _, err := config.SetPaused(home, true); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	payload := map[string]any{
+		"hook_event_name": "SessionStart", "session_id": "native-1",
+		"cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl",
+	}
+	if err := handleHookEvent(home, "codex", payload, now); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regs, err := store.LoadRegistrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(regs) != 0 {
+		t.Fatalf("a paused hook must register nothing new: regs=%#v", regs)
+	}
+}
+
 func TestRunHookCommandNeverFailsOnMalformedInput(t *testing.T) {
 	home := t.TempDir()
 	env := testEnv(t, home, time.Now())

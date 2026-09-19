@@ -387,7 +387,11 @@ func TestEnsureArchiveSessionIDPersistsAndReuses(t *testing.T) {
 }
 
 func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
-	local := newTestStore(t)
+	home := t.TempDir()
+	local, err := NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A native session ID is harness-controlled input; it must not be usable
 	// to escape the sessions/ directory even though it is only ever hashed,
 	// not used directly as a path component.
@@ -398,7 +402,10 @@ func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
 	if id == "" {
 		t.Fatal("expected a valid archive session ID")
 	}
-	if _, err := os.Stat(filepath.Join(t.TempDir(), "..", "..", "etc", "passwd")); err == nil {
+	// Checked against home, the store's actual base directory — not some
+	// other, unrelated temp directory — so this would actually catch a
+	// future regression that built a path from the native ID directly.
+	if _, err := os.Stat(filepath.Join(home, "..", "..", "etc", "passwd")); err == nil {
 		t.Fatal("unexpected file escape")
 	}
 }
