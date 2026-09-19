@@ -227,10 +227,21 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	}
 	// A ParseError here still yields a minimal, safe-to-publish metadata
 	// document with parser.status "failed", per the spec's failure table:
-	// archive the filtered source and retry parsing later.
+	// archive the filtered source and retry parsing later. A ParseError
+	// also means metadata.SkillsUsed is necessarily empty (parsing never
+	// got far enough to derive it), so RequireSkillUse must not read that
+	// as "no skill use" and decline the session — that would silently and
+	// permanently skip every session whose transcript fails to parse,
+	// contradicting the comment above and the failure table it cites.
+	parseFailed := archive.IsParseError(buildErr)
 
-	if opts.RequireSkillUse && len(metadata.SkillsUsed) == 0 {
-		if err := local.SavePublished(reg.ArchiveSessionID, candidate, candidate.Capture.CapturedAt, CacheStatusDeclined); err != nil {
+	if opts.RequireSkillUse && !parseFailed && len(metadata.SkillsUsed) == 0 {
+		// Nothing was ever actually published, so this candidate carries no
+		// real publish history; a zero PublishedAt correctly signals that
+		// to the rate-limit check above once this decline is reconsidered
+		// by a later content change, rather than a manufactured timestamp
+		// making a genuinely-first publish look rate-limited.
+		if err := local.SavePublished(reg.ArchiveSessionID, candidate, time.Time{}, CacheStatusDeclined); err != nil {
 			return outcomeSkipped, fmt.Errorf("cache declined candidate: %w", err)
 		}
 		return outcomeSkipped, nil
