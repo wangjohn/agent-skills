@@ -52,6 +52,11 @@ type Env struct {
 	// out to launchctl; unverified against a real launchd (see the
 	// implementation ledger).
 	LoadLaunchAgent func(plistPath string) error
+	// UnloadLaunchAgent undoes a successful LoadLaunchAgent, used only to
+	// roll setup back if a later step (config.Save) fails after the
+	// LaunchAgent was already loaded. Defaults to shelling out to
+	// launchctl; unverified against a real launchd, same as LoadLaunchAgent.
+	UnloadLaunchAgent func(plistPath string) error
 	// Keychain opens the credential store setup saves R2 secrets to.
 	// Defaults to credentials.NewKeychainStore, which is only available on
 	// a darwin+cgo build.
@@ -105,6 +110,13 @@ func (e Env) loadLaunchAgent(plistPath string) error {
 		return e.LoadLaunchAgent(plistPath)
 	}
 	return loadLaunchAgent(plistPath)
+}
+
+func (e Env) unloadLaunchAgent(plistPath string) error {
+	if e.UnloadLaunchAgent != nil {
+		return e.UnloadLaunchAgent(plistPath)
+	}
+	return unloadLaunchAgent(plistPath)
 }
 
 func (e Env) keychain() (credentials.CredentialStore, error) {

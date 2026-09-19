@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,6 +60,11 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 		return 1
 	}
 
+	// credentialCommitted guards the deferred cleanup below: it flips to
+	// true only once setup actually finishes (after config.Save succeeds).
+	// Declared here, outside the "if saveSecret" block, so it stays in
+	// scope for that block's defer as well as the success path far below.
+	credentialCommitted := false
 	if saveSecret {
 		keychain, err := env.keychain()
 		if err != nil {
@@ -69,6 +75,23 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 			fmt.Fprintf(stderr, "agent-archive: setup: save R2 credentials: %v\n", err)
 			return 1
 		}
+		// VerifyAccess below reads an R2 secret back from Keychain by
+		// reference, so it must already be saved before verification can
+		// run — the save can't simply move after VerifyAccess. Instead,
+		// this docstring's "nothing is written until confirmation"
+		// guarantee is restored here: any early return between this save
+		// and the final successful config.Save removes the credential
+		// again, so a failed or abandoned setup never leaves a fresh R2
+		// secret behind. A reused existing credential (saveSecret false)
+		// is never touched.
+		defer func() {
+			if credentialCommitted {
+				return
+			}
+			if delErr := keychain.Delete(ctx, storageCfg.R2CredentialRef); delErr != nil {
+				fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove uncommitted R2 credentials: %v\n", delErr)
+			}
+		}()
 	}
 
 	fmt.Fprintln(stdout, "\nVerifying storage access...")
@@ -179,9 +202,12 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 		}
 		return 1
 	}
+	launchAgentLoaded := false
 	if err := env.loadLaunchAgent(plistPath); err != nil {
 		fmt.Fprintf(stdout, "\nWarning: could not start the background collector automatically: %v\n", err)
 		fmt.Fprintln(stdout, "It will start at your next login; run `agent-archive sync` by hand until then.")
+	} else {
+		launchAgentLoaded = true
 	}
 
 	cfg := config.Config{
@@ -196,12 +222,39 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	}
 	if err := config.Save(home, cfg); err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: save config: %v\n", err)
+		// Hooks and the LaunchAgent are already live on the host at this
+		// point; without this, a config.Save failure (disk full, a
+		// permission error) would leave both running with no config.json
+		// behind them, so `status`/`sync` would treat the machine as
+		// unconfigured while hooks kept firing regardless.
+		rollbackHooksAndLaunchAgent(env, stderr, changes, plistPath, launchAgentLoaded)
 		return 1
 	}
+	credentialCommitted = true
 
 	fmt.Fprintln(stdout, "\nSetup complete. Start a session in an included application, then run")
 	fmt.Fprintln(stdout, "`agent-archive status` to confirm capture.")
 	return 0
+}
+
+// rollbackHooksAndLaunchAgent undoes hook installation and a written (and
+// possibly already-loaded) LaunchAgent plist. It is used only after
+// config.Save fails partway through setup, once hooks and the LaunchAgent
+// are already live on the host: without this, that failure would leave both
+// running with no config.json behind them. Each step is best-effort and
+// independent, so one failing does not stop the others from being tried.
+func rollbackHooksAndLaunchAgent(env Env, stderr io.Writer, changes []hooks.Change, plistPath string, launchAgentLoaded bool) {
+	if launchAgentLoaded {
+		if err := env.unloadLaunchAgent(plistPath); err != nil {
+			fmt.Fprintf(stderr, "agent-archive: setup: warning: could not unload LaunchAgent during rollback: %v\n", err)
+		}
+	}
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove LaunchAgent plist during rollback: %v\n", err)
+	}
+	if err := hooks.Rollback(changes); err != nil {
+		fmt.Fprintf(stderr, "agent-archive: setup: hook rollback also failed: %v\n", err)
+	}
 }
 
 // promptStorage collects a storage destination, defaulting every field to

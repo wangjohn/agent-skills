@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,5 +228,112 @@ func TestSyncRunsRetentionSweepAndDeletesExpiredSession(t *testing.T) {
 	}
 	if len(regs) != 0 {
 		t.Fatalf("expected the session to have aged out: %#v", regs)
+	}
+}
+
+func TestCollectCommandRecordsPreflightFailureInStatus(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	env := testEnv(t, home, time.Now())
+	openErr := errors.New("simulated broken storage credentials")
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return nil, openErr }
+
+	var out, errOut bytes.Buffer
+	if code := runCollectCommand(nil, &out, &errOut, env); code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+
+	store, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.LoadStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status.LastError, openErr.Error()) {
+		t.Fatalf("expected status.LastError to record the preflight failure, got %q", status.LastError)
+	}
+}
+
+// failingDeleteStore fails every Delete, used to force retention.Sweep to
+// report a per-session error without needing to know its internal object
+// key naming.
+type failingDeleteStore struct{ storage.ObjectStore }
+
+func (f failingDeleteStore) Delete(ctx context.Context, key string) error {
+	return errors.New("simulated delete failure")
+}
+
+func TestSyncSurfacesRetentionErrorsInResultAndStatus(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	setUpTestConfig(t, home, dir, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cfg, _, err := config.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RetentionDays = 1
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	transcript := writeCodexTranscript(t, dir)
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	if err := handleHookEvent(home, "codex", payload, now); err != nil {
+		t.Fatal(err)
+	}
+
+	var mem *storage.MemoryStore
+	env := testEnv(t, home, now)
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		if mem == nil {
+			mem = storage.NewMemoryStore()
+		}
+		return mem, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runSyncCommand(nil, &stdout, &stderr, env); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+
+	// Two days later, well past the 1-day retention window, but every
+	// delete this pass attempts now fails.
+	later := now.Add(48 * time.Hour)
+	env2 := env
+	env2.Now = func() time.Time { return later }
+	env2.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		return failingDeleteStore{mem}, nil
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := runSyncCommand(nil, &stdout, &stderr, env2)
+	if code != 1 {
+		t.Fatalf("expected sync to report the retention failure as an error: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "retention:") {
+		t.Fatalf("expected sync's report to mention the retention failure: stdout=%s", stdout.String())
+	}
+
+	store, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.LoadStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status.LastError, "failed to scan, publish, or clean up") {
+		t.Fatalf("expected status.LastError to reflect the retention failure, got %q", status.LastError)
+	}
+	// The session must still be registered locally: a failed delete must
+	// never be treated as if it had succeeded.
+	regs, err := store.LoadRegistrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(regs) != 1 {
+		t.Fatalf("expected the session to remain registered after a failed retention delete: %#v", regs)
 	}
 }
