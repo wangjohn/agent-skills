@@ -172,6 +172,16 @@ func SourceObjectKey(bundle SourceBundle, sha256 string) (string, error) {
 	return fmt.Sprintf("sessions/%s/%s/source.%s.json.gz", bundle.Capture.Harness.Name, bundle.ArchiveSessionID, sha256), nil
 }
 
+// MetadataObjectKey returns the provider-relative key for a session's
+// replaceable metadata sidecar. Unlike SourceObjectKey it is not
+// content-addressed: publishing new metadata overwrites this key.
+func MetadataObjectKey(harnessName, archiveSessionID string) (string, error) {
+	if !safeObjectComponent(harnessName) || !safeObjectComponent(archiveSessionID) {
+		return "", errors.New("harness name and archive session ID must be safe object-key components")
+	}
+	return fmt.Sprintf("sessions/%s/%s/metadata.json", harnessName, archiveSessionID), nil
+}
+
 func isLowerHexSHA256(value string) bool {
 	if len(value) != 64 {
 		return false

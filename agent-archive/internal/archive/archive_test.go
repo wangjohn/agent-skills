@@ -167,6 +167,12 @@ func TestSourceBundleIsDeterministicAndGzipTimestampIsFixed(t *testing.T) {
 	if _, err := SourceObjectKey(registrationBundle(t), strings.ToUpper(first.SHA256)); err == nil {
 		t.Fatal("uppercase source hash accepted in object key")
 	}
+	if key, err := MetadataObjectKey("codex", "archive-123"); err != nil || key != "sessions/codex/archive-123/metadata.json" {
+		t.Fatalf("key=%q err=%v", key, err)
+	}
+	if _, err := MetadataObjectKey("codex", "../../escape"); err == nil {
+		t.Fatal("unsafe archive session ID accepted in metadata object key")
+	}
 }
 
 func registrationBundle(t *testing.T) SourceBundle {
