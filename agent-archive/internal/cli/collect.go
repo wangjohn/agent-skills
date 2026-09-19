@@ -72,7 +72,11 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if err != nil {
 		return collector.Result{}, fmt.Errorf("open storage: %w", err)
 	}
-	return collector.Run(context.Background(), localStore, objectStore, collector.Options{MachineID: cfg.MachineID, Now: env.Now})
+	return collector.Run(context.Background(), localStore, objectStore, collector.Options{
+		MachineID:       cfg.MachineID,
+		Now:             env.Now,
+		RequireSkillUse: cfg.RequireSkillUse,
+	})
 }
 
 // openConfiguredStore resolves cfg.Storage into a live ObjectStore. A

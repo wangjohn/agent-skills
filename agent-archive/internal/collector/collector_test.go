@@ -402,3 +402,36 @@ func TestArchiveSessionIDRejectsPathLikeInputSafely(t *testing.T) {
 		t.Fatal("unexpected file escape")
 	}
 }
+
+func TestRunDeclinesPublishWhenSkillUseRequiredAndAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return now }, RequireSkillUse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Published) != 0 || len(result.Skipped) != 1 {
+		t.Fatalf("expected a policy decline, not a publish: %#v", result)
+	}
+	if objs, err := store.List(context.Background(), "sessions"); err != nil || len(objs) != 0 {
+		t.Fatalf("nothing should have been uploaded: objs=%#v err=%v", objs, err)
+	}
+
+	// A later scan with unchanged content must not retry the publish just
+	// because time passed (unlike a rate-limited candidate).
+	later := now.Add(24 * time.Hour)
+	result, err = Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return later }, RequireSkillUse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Published) != 0 || len(result.Skipped) != 1 {
+		t.Fatalf("a decline must not auto-publish later: %#v", result)
+	}
+}
