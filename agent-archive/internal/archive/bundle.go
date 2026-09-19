@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -170,6 +171,17 @@ func SourceObjectKey(bundle SourceBundle, sha256 string) (string, error) {
 		return "", errors.New("source sha256 must be 64 lowercase hexadecimal characters")
 	}
 	return fmt.Sprintf("sessions/%s/%s/source.%s.json.gz", bundle.Capture.Harness.Name, bundle.ArchiveSessionID, sha256), nil
+}
+
+// ProjectID deterministically derives a stable project identifier from a
+// project root path, so a hook and a setup flow running at different times
+// agree on the same ID for the same project without a shared lookup table.
+// It is lexical, matching ProjectActivation.Eligible: a caller is
+// responsible for resolving symlinks before deriving an ID it depends on
+// matching a previously derived one.
+func ProjectID(root string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(root)))
+	return "project-" + hex.EncodeToString(sum[:])[:16]
 }
 
 // MetadataObjectKey returns the provider-relative key for a session's

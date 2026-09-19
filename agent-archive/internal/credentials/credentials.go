@@ -22,6 +22,11 @@ var (
 	ErrMissingCredential = errors.New("credential is missing")
 )
 
+// KeychainService is the canonical macOS Keychain service name this archive
+// uses for every R2CredentialRef, so a hook, the collector, and setup all
+// resolve the same stored item.
+const KeychainService = "agent-archive"
+
 // R2Credentials are intentionally only accepted through a Keychain-backed
 // reference in production setup. They are value types so callers can inject a
 // test credential provider without any shell or command-line transport.
