@@ -52,4 +52,14 @@ python3 scripts/validate.py
 
 ## Private agent-run archive
 
-The proposed [product and engineering specification](docs/agent-run-archive-spec.md) covers the `agent-archive` CLI, onboarding for private R2 and S3 storage, Codex/Claude Code/Cursor capture, metadata, privacy, recovery, and rollout. This is a plan, not an implemented release.
+`agent-archive` is a small macOS CLI (in [`agent-archive/`](agent-archive/)) that keeps a private, local-first archive of your Codex, Claude Code, and Cursor sessions in a bucket you own. It installs lifecycle hooks in each app, runs a background collector that uploads session transcripts and metadata to a private Cloudflare R2 or Amazon S3 bucket, and prunes them on a retention schedule. No account or hosted service is involved.
+
+Commands:
+
+- `agent-archive setup` guides first-time setup or a safe reconfiguration.
+- `agent-archive status` shows storage, collector, hooks, and capture coverage.
+- `agent-archive sync` runs one collection and upload pass now.
+- `agent-archive pause` and `agent-archive resume` suspend and restore scheduled work.
+- `agent-archive uninstall` removes hooks, the collector, and local state; it never touches the bucket.
+
+See [agent-archive/docs/install.md](agent-archive/docs/install.md) for install and uninstall steps, and the [product and engineering specification](docs/agent-run-archive-spec.md) for the design.

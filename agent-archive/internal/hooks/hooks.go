@@ -48,47 +48,8 @@ func Merge(existing []byte, harness, executable string) ([]byte, error) {
 		root["hooks"] = hs
 	}
 	command := quote(executable) + " _hook --harness " + harness + " # " + Owner
-	// Remove only our marker or an exact known prototype handler, including events
-	// no longer used by the new implementation. Never remove by substring alone.
-	for event, raw := range hs {
-		groups, ok := raw.([]any)
-		if !ok {
-			return nil, fmt.Errorf("invalid hook list for %s", event)
-		}
-		kept := []any{}
-		for _, item := range groups {
-			g, ok := item.(map[string]any)
-			if !ok {
-				return nil, errors.New("invalid hook entry")
-			}
-			if harness == "cursor" {
-				if old, ok := g["command"].(string); ok && strings.HasSuffix(old, " # "+Owner) {
-					continue
-				}
-				kept = append(kept, g)
-				continue
-			}
-			handlers, ok := g["hooks"].([]any)
-			if !ok {
-				return nil, errors.New("invalid hook handlers")
-			}
-			remaining := []any{}
-			for _, h := range handlers {
-				m, ok := h.(map[string]any)
-				if !ok {
-					return nil, errors.New("invalid hook handler")
-				}
-				if m["statusMessage"] == Owner || m["statusMessage"] == "Recording private skill-run evidence" {
-					continue
-				}
-				remaining = append(remaining, h)
-			}
-			if len(remaining) > 0 {
-				g["hooks"] = remaining
-				kept = append(kept, g)
-			}
-		}
-		hs[event] = kept
+	if _, err := stripOwned(hs, harness); err != nil {
+		return nil, err
 	}
 	for _, event := range events {
 		handler := map[string]any{"command": command, "timeout": 2}
@@ -104,4 +65,100 @@ func Merge(existing []byte, harness, executable string) ([]byte, error) {
 	data, err := json.MarshalIndent(root, "", "  ")
 	return append(data, '\n'), err
 }
+
+// Remove strips every handler this tool installed for harness from existing,
+// leaving unrelated handlers and top-level settings exactly as they were. It
+// reports whether anything was actually removed so a caller can skip
+// rewriting a file that never contained our entries. Like Merge, it only
+// ever matches our own marker (or the exact known prototype handler), never
+// a substring of an unrelated command.
+func Remove(existing []byte, harness string) ([]byte, bool, error) {
+	switch harness {
+	case "codex", "claude", "cursor":
+	default:
+		return nil, false, errors.New("unsupported harness")
+	}
+	if len(bytes.TrimSpace(existing)) == 0 {
+		return existing, false, nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(existing, &root); err != nil || root == nil {
+		return nil, false, errors.New("invalid existing hook configuration")
+	}
+	hs, ok := root["hooks"].(map[string]any)
+	if !ok {
+		if root["hooks"] != nil {
+			return nil, false, errors.New("invalid hooks object")
+		}
+		return existing, false, nil
+	}
+	removed, err := stripOwned(hs, harness)
+	if err != nil {
+		return nil, false, err
+	}
+	if !removed {
+		return existing, false, nil
+	}
+	// An event whose only handlers were ours is dropped entirely rather than
+	// left as an empty list setup never created.
+	for event, raw := range hs {
+		if list, ok := raw.([]any); ok && len(list) == 0 {
+			delete(hs, event)
+		}
+	}
+	data, err := json.MarshalIndent(root, "", "  ")
+	return append(data, '\n'), true, err
+}
+
+// stripOwned removes only our marker or an exact known prototype handler
+// from every event in hs, including events no longer used by the current
+// implementation. It never removes by substring alone. It reports whether
+// any handler was removed.
+func stripOwned(hs map[string]any, harness string) (bool, error) {
+	removed := false
+	for event, raw := range hs {
+		groups, ok := raw.([]any)
+		if !ok {
+			return false, fmt.Errorf("invalid hook list for %s", event)
+		}
+		kept := []any{}
+		for _, item := range groups {
+			g, ok := item.(map[string]any)
+			if !ok {
+				return false, errors.New("invalid hook entry")
+			}
+			if harness == "cursor" {
+				if old, ok := g["command"].(string); ok && strings.HasSuffix(old, " # "+Owner) {
+					removed = true
+					continue
+				}
+				kept = append(kept, g)
+				continue
+			}
+			handlers, ok := g["hooks"].([]any)
+			if !ok {
+				return false, errors.New("invalid hook handlers")
+			}
+			remaining := []any{}
+			for _, h := range handlers {
+				m, ok := h.(map[string]any)
+				if !ok {
+					return false, errors.New("invalid hook handler")
+				}
+				if m["statusMessage"] == Owner || m["statusMessage"] == "Recording private skill-run evidence" {
+					removed = true
+					continue
+				}
+				remaining = append(remaining, h)
+			}
+			if len(remaining) > 0 {
+				g["hooks"] = remaining
+				kept = append(kept, g)
+			}
+		}
+		hs[event] = kept
+	}
+	return removed, nil
+}
+
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }

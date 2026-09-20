@@ -86,8 +86,33 @@ one-time Gatekeeper approval an unsigned binary needs.
 
 ## Uninstalling
 
-There is no dedicated `agent-archive uninstall` command yet. To fully
-remove it:
+Run the built-in command:
+
+```sh
+agent-archive uninstall
+```
+
+It prints exactly what it is about to remove and asks for confirmation
+before touching anything. On confirmation it:
+
+- stops and removes the background collector LaunchAgent
+  (`~/Library/LaunchAgents/com.agent-archive.collector.plist`);
+- removes only its own `agent-archive _hook ...` entries from each
+  included application's hook configuration (`~/.codex/hooks.json`,
+  `~/.claude/settings.json`, or `~/.cursor/hooks.json`), leaving every
+  unrelated hook and setting in place;
+- deletes the R2 credentials setup stored in Keychain, when the
+  configuration references them (an S3 setup stores none);
+- removes local state: config, per-session cache, and logs under
+  `~/.local/share/agent-archive` (or `$AGENT_ARCHIVE_HOME`).
+
+Nothing in your bucket is read, listed, or deleted: every archived session
+stays exactly where it is. The binary itself is left in place; remove it
+with `rm /usr/local/bin/agent-archive` (or wherever you put it).
+
+If the command cannot complete (for example, launchd is not reachable or a
+hook file was edited concurrently), it says which step failed and leaves the
+rest done. The same steps by hand, as a fallback:
 
 ```sh
 # Stop the background collector.
@@ -101,11 +126,10 @@ rm -rf ~/.local/share/agent-archive
 rm /usr/local/bin/agent-archive
 ```
 
-Setup also adds an `agent-archive _hook ...` entry to each included
-application's own hook configuration (`~/.codex/hooks.json`,
-`~/.claude/settings.json`, or `~/.cursor/hooks.json`); remove that entry
-by hand if you no longer want the application invoking it. Without the
-LaunchAgent, `_hook` still records session bookkeeping under
-`~/.local/share/agent-archive` on every run, but nothing is ever
-published to remote storage — only `_collect`, which the LaunchAgent
-schedules, does that.
+Then remove the `agent-archive _hook ...` entry (marked with the comment
+`agent-archive lifecycle capture`) from each included application's hook
+configuration, and delete the `agent-archive` item for your bucket from
+Keychain Access if you used R2. Without the LaunchAgent, a leftover `_hook`
+entry still records session bookkeeping under `~/.local/share/agent-archive`
+on every run, but nothing is ever published to remote storage — only
+`_collect`, which the LaunchAgent schedules, does that.

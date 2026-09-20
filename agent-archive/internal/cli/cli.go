@@ -1,7 +1,7 @@
 // Package cli implements the agent-archive command-line interface: the
 // hidden `_hook` and `_collect` entry points a real installation's hooks
-// and LaunchAgent invoke, and the user-facing setup/status/sync/pause/resume
-// commands. It is the only package that touches process-level state
+// and LaunchAgent invoke, and the user-facing
+// setup/status/sync/pause/resume/uninstall commands. It is the only package that touches process-level state
 // (args, stdio, the real clock, the real home directory) directly; every
 // other package in this module stays free of that so it can be tested
 // without a real environment.
@@ -52,12 +52,14 @@ type Env struct {
 	// out to launchctl; unverified against a real launchd (see the
 	// implementation ledger).
 	LoadLaunchAgent func(plistPath string) error
-	// UnloadLaunchAgent undoes a successful LoadLaunchAgent, used only to
-	// roll setup back if a later step (config.Save) fails after the
-	// LaunchAgent was already loaded. Defaults to shelling out to
-	// launchctl; unverified against a real launchd, same as LoadLaunchAgent.
+	// UnloadLaunchAgent undoes a successful LoadLaunchAgent: it rolls setup
+	// back if a later step (config.Save) fails after the LaunchAgent was
+	// already loaded, and stops the collector during uninstall. Defaults to
+	// shelling out to launchctl; unverified against a real launchd, same as
+	// LoadLaunchAgent.
 	UnloadLaunchAgent func(plistPath string) error
-	// Keychain opens the credential store setup saves R2 secrets to.
+	// Keychain opens the credential store setup saves R2 secrets to and
+	// uninstall deletes them from.
 	// Defaults to credentials.NewKeychainStore, which is only available on
 	// a darwin+cgo build.
 	Keychain func() (credentials.CredentialStore, error)
@@ -135,6 +137,7 @@ Usage:
   agent-archive sync      Run one collection/upload pass now
   agent-archive pause     Persistently pause collection and uploads
   agent-archive resume    Resume scheduled work
+  agent-archive uninstall Remove hooks, the collector, and local state (never the bucket)
   agent-archive --help    Show this help
   agent-archive --version Show the version
 
@@ -171,6 +174,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int 
 		return runPauseCommand(stdout, stderr, env, false)
 	case "setup":
 		return runSetupCommand(args[1:], stdin, stdout, stderr, env)
+	case "uninstall":
+		return runUninstallCommand(args[1:], stdin, stdout, stderr, env)
 	default:
 		fmt.Fprintf(stderr, "agent-archive: unknown command %q\n\n%s", args[0], usage)
 		return 2
