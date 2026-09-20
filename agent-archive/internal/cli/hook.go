@@ -150,17 +150,24 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		}
 	}
 
-	// This native session ID has never been registered locally. A harness
-	// that documents a resume-vs-fresh-start distinction (today, only
-	// Claude Code's "source":"resume" field) tells us this is a resume of a
-	// conversation whose true start time we cannot establish, in which case
-	// the spec's own guidance applies: leave it uncollected rather than
-	// guess. Cursor and Codex do not document an equivalent signal, so a
-	// first-seen start for them is treated as fresh; this is a known
-	// simplification pending live verification against those harnesses
-	// (tracked in docs/agent-archive-implementation.md).
-	if strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "claude-code") {
-		if source, _ := payload["source"].(string); source == "resume" {
+	// This native session ID has never been registered locally. Claude Code
+	// and Codex both document a "source" field on SessionStart that
+	// distinguishes a fresh conversation from a continuation of an earlier
+	// one (Codex: https://learn.chatgpt.com/docs/hooks.md, "Common input
+	// fields" and the SessionStart section; values "startup", "resume",
+	// "clear", "compact"). "resume" and "compact" both continue a
+	// conversation whose true start time we cannot establish from this
+	// event, so for a never-seen session the spec's guidance on older
+	// resumed sessions applies: leave it uncollected rather than guess. A
+	// "compact" of a session we already registered never reaches here; the
+	// found branch above keeps its original start time. "startup" and
+	// "clear" both begin a new conversation and are treated as fresh.
+	// Cursor does not document an equivalent signal, so a first-seen start
+	// for it is treated as fresh; this is a known simplification pending
+	// live verification against that harness (tracked in
+	// docs/agent-archive-implementation.md).
+	if harnessReportsSessionSource(harness) {
+		if source, _ := payload["source"].(string); sessionSourceContinuesEarlierConversation(source) {
 			return nil
 		}
 	}
@@ -185,6 +192,29 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		RegisteredAt:     now,
 	}
 	return store.SaveRegistration(reg)
+}
+
+// harnessReportsSessionSource reports whether the harness documents a
+// "source" field on its SessionStart payload. Claude Code and Codex do;
+// Cursor does not.
+func harnessReportsSessionSource(harness string) bool {
+	switch strings.ToLower(strings.TrimSpace(harness)) {
+	case "claude", "claude-code", "codex":
+		return true
+	}
+	return false
+}
+
+// sessionSourceContinuesEarlierConversation reports whether a documented
+// SessionStart "source" value means the event continues a conversation
+// that began earlier ("resume", "compact") rather than starting a new one
+// ("startup", "clear", or absent).
+func sessionSourceContinuesEarlierConversation(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "resume", "compact":
+		return true
+	}
+	return false
 }
 
 func handleSessionStop(store *collector.LocalStore, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {
