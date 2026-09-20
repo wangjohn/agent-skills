@@ -112,6 +112,78 @@ func TestHandleHookEventSkipsResumeOfUnknownClaudeSession(t *testing.T) {
 	}
 }
 
+func TestHandleHookEventSkipsResumeOfUnknownCodexSession(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	for _, source := range []string{"resume", "compact"} {
+		payload := map[string]any{
+			"hook_event_name": "SessionStart", "session_id": "native-old-" + source, "source": source,
+			"cwd": "/work/widget",
+		}
+		if err := handleHookEvent(home, "codex", payload, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if len(regs) != 0 {
+		t.Fatalf("a Codex resume/compact of a never-seen session must not be registered: %#v", regs)
+	}
+}
+
+func TestHandleHookEventRegistersCodexStartup(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	for _, source := range []string{"startup", "clear"} {
+		payload := map[string]any{
+			"hook_event_name": "SessionStart", "session_id": "native-" + source, "source": source,
+			"cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl",
+		}
+		if err := handleHookEvent(home, "codex", payload, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if len(regs) != 2 {
+		t.Fatalf("a Codex startup/clear must register a fresh session: %#v", regs)
+	}
+	for _, reg := range regs {
+		if reg.Harness.Name != "codex" || !reg.SessionStartedAt.Equal(now) {
+			t.Fatalf("reg=%#v", reg)
+		}
+	}
+}
+
+func TestHandleHookEventCodexCompactPreservesOriginalStartTime(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	firstStart := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "source": "startup", "cwd": "/work/widget"}
+	if err := handleHookEvent(home, "codex", payload, firstStart); err != nil {
+		t.Fatal(err)
+	}
+
+	compactAt := firstStart.Add(2 * time.Hour)
+	compactPayload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "source": "compact", "cwd": "/work/widget"}
+	if err := handleHookEvent(home, "codex", compactPayload, compactAt); err != nil {
+		t.Fatal(err)
+	}
+
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if len(regs) != 1 {
+		t.Fatalf("regs=%#v", regs)
+	}
+	if !regs[0].SessionStartedAt.Equal(firstStart) {
+		t.Fatalf("compact must preserve the original start time: got %s want %s", regs[0].SessionStartedAt, firstStart)
+	}
+}
+
 func TestHandleHookEventResumePreservesOriginalStartTime(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
