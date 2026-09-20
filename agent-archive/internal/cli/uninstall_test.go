@@ -301,3 +301,30 @@ func TestUsageListsUninstall(t *testing.T) {
 		t.Fatalf("help output missing uninstall: %s", out.String())
 	}
 }
+
+func TestUninstallLeavesFilesItDidNotCreate(t *testing.T) {
+	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	// A user who pointed AGENT_ARCHIVE_HOME at a directory of their own.
+	foreign := filepath.Join(home, "my-notes.txt")
+	if err := os.WriteFile(foreign, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runUninstallCommand(nil, strings.NewReader("y\n"), &stdout, &stderr, env)
+	if code != 1 {
+		t.Fatalf("expected a leftover to be reported as incomplete: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "my-notes.txt") {
+		t.Fatalf("stderr must name the leftover entry:\n%s", stderr.String())
+	}
+	if b, err := os.ReadFile(foreign); err != nil || string(b) != "keep me\n" {
+		t.Fatalf("foreign file must survive untouched: err=%v content=%q", err, b)
+	}
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("agent-archive's own config must still be removed")
+	}
+	entries, _ := os.ReadDir(home)
+	if len(entries) != 1 {
+		t.Fatalf("only the foreign file should remain, got %d entries", len(entries))
+	}
+}
