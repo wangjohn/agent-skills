@@ -52,6 +52,33 @@ Macs are supported.
    the [engineering specification](../../docs/agent-run-archive-spec.md)
    for what each step does and why.
 
+## Inspecting what was archived
+
+Once sessions have been published, two read-only commands show what is in
+the bucket without touching local collector state:
+
+```sh
+# Every archived session, newest first: ID, harness, capture time, parser
+# status, models, and skills used. Metadata only, never transcript text.
+agent-archive list
+
+# Narrow it down. --since takes a date, an RFC 3339 time, or an age.
+agent-archive list --harness claude --model claude-opus-5 --since 7d
+agent-archive list --skill review --skill-usage eligible_no_use
+agent-archive list --complete   # complete parser coverage, no capture gaps
+
+# One session's metadata sidecar, as JSON.
+agent-archive show <archive-session-id>
+```
+
+`show` prints conversation content only when asked: `--normalized`
+downloads the session's source bundle, verifies its checksum and identity
+against the metadata, and prints the normalized view (turns, tool calls,
+and hook-reported final messages) after the sidecar. If the same session
+ID was somehow published under more than one harness, pass `--harness` to
+pick one. Both commands print `Not set up.` and exit 0 before setup has run,
+the same as `status`.
+
 ## Build from source
 
 Requires Go 1.24+ and, for real macOS Keychain access, Xcode's command

@@ -109,3 +109,31 @@ func TestSkillAvailableEligibleEntrySurvivesLaterNonEligibleEntry(t *testing.T) 
 		t.Fatal("eligible entry excluded by a later non-eligible entry for the same skill name")
 	}
 }
+
+func TestReadMetadataAndFindMetadataKeys(t *testing.T) {
+	metadata, _, store := fixture(t)
+	ctx := context.Background()
+	keys, err := FindMetadataKeys(ctx, store, "sessions", "session-1")
+	if err != nil || len(keys) != 1 || keys[0] != "sessions/codex/session-1/metadata.json" {
+		t.Fatalf("keys=%v err=%v", keys, err)
+	}
+	if none, err := FindMetadataKeys(ctx, store, "sessions", "session-2"); err != nil || len(none) != 0 {
+		t.Fatalf("keys=%v err=%v", none, err)
+	}
+	if _, err = FindMetadataKeys(ctx, store, "sessions", "codex/session-1"); err == nil {
+		t.Fatal("ID containing a path separator accepted")
+	}
+	got, err := ReadMetadata(ctx, store, keys[0])
+	if err != nil || got.SessionID != metadata.SessionID {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	if _, err = ReadMetadata(ctx, store, "sessions/codex/missing/metadata.json"); err == nil {
+		t.Fatal("missing sidecar read succeeded")
+	}
+	if err = store.Put(ctx, "sessions/codex/broken/metadata.json", []byte(`{"schema_version":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ReadMetadata(ctx, store, "sessions/codex/broken/metadata.json"); err == nil {
+		t.Fatal("sidecar without a source reference accepted")
+	}
+}
