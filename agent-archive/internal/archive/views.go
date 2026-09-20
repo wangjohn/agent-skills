@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -20,6 +21,10 @@ type NormalizedView struct {
 	Turns      []NormalizedTurn
 	ToolCalls  []NormalizedToolCall
 	HookFinals []HookFinalReconciliation
+	// NativeSkillUses is collected in the same per-record walk as ToolCalls
+	// (see toolCalls), rather than a second, separate traversal, so
+	// deriveSkills only has to fold this in with supplemental evidence.
+	NativeSkillUses []SkillUse
 }
 
 // TurnModelSource names where a NormalizedTurn's model attribution came from.
@@ -89,7 +94,9 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 			codexModel, codexReasoning = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort")
 			continue
 		}
-		view.ToolCalls = append(view.ToolCalls, toolCalls(record, i, codexModel, codexReasoning)...)
+		calls, skillUses := toolCalls(record, i, codexModel, codexReasoning)
+		view.ToolCalls = append(view.ToolCalls, calls...)
+		view.NativeSkillUses = append(view.NativeSkillUses, skillUses...)
 		role, text, ok := findVisibleMessage(record)
 		if !ok {
 			continue
@@ -137,15 +144,60 @@ func reconcileHookFinals(bundle SourceBundle, turns []NormalizedTurn) []HookFina
 	return out
 }
 
-func toolCalls(record map[string]any, index int, model, reasoning string) []NormalizedToolCall {
-	var out []NormalizedToolCall
+// toolCalls walks one native record once, extracting both its normalized
+// tool-call entries and any native skill invocation/read-inference signal
+// found along the way — a single pass shared by ParseNormalized's ToolCalls
+// and deriveSkills' native-record evidence, rather than each doing its own
+// separate recursive walk over the same structure.
+func toolCalls(record map[string]any, index int, model, reasoning string) ([]NormalizedToolCall, []SkillUse) {
+	var calls []NormalizedToolCall
+	var skillUses []SkillUse
 	var walk func(any)
 	walk = func(value any) {
 		switch item := value.(type) {
 		case map[string]any:
 			kind, _ := item["type"].(string)
-			if kind == "tool_use" || kind == "tool_call" || kind == "function_call" {
-				out = append(out, NormalizedToolCall{RecordIndex: index, CallID: firstString(item, "call_id", "id"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Model: model, Reasoning: reasoning})
+			// "function_call"/"tool_call" cover Codex's and other harnesses'
+			// shapes alongside Claude's "tool_use".
+			isToolInvocation := kind == "tool_use" || kind == "tool_call" || kind == "function_call"
+			if isToolInvocation {
+				calls = append(calls, NormalizedToolCall{RecordIndex: index, CallID: firstString(item, "call_id", "id"), ParentID: firstStringDeep(record, "parent_id", "parent_uuid", "parentUuid"), Model: model, Reasoning: reasoning})
+			}
+			tool := firstString(item, "name", "tool_name")
+			if isToolInvocation && strings.EqualFold(tool, "skill") {
+				if input, ok := item["input"].(map[string]any); ok {
+					if name := firstString(input, "skill", "name"); name != "" {
+						skillUses = append(skillUses, SkillUse{Name: name, Evidence: SkillUseEvidenceNativeInvocation})
+					}
+				}
+			}
+			path := firstString(item, "file_path", "path")
+			if input, ok := item["input"].(map[string]any); ok && path == "" {
+				path = firstString(input, "file_path", "path")
+			}
+			if path == "" {
+				// Codex's function_call records carry their arguments as a
+				// JSON-encoded string (e.g. `{"path":"..."}`), not a nested
+				// object like "input" above — parse it the same way before
+				// giving up on finding a path in this record.
+				if raw, ok := item["arguments"].(string); ok && raw != "" {
+					var args map[string]any
+					if json.Unmarshal([]byte(raw), &args) == nil {
+						path = firstString(args, "file_path", "path")
+					}
+				}
+			}
+			command := firstString(item, "command", "arguments")
+			readTool := strings.EqualFold(tool, "read") || strings.EqualFold(tool, "read_file")
+			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
+			if readTool || catRead {
+				if name := skillNameFromPath(path); name != "" {
+					skillUses = append(skillUses, SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
+				} else if catRead {
+					if name := skillNameFromPath(command); name != "" {
+						skillUses = append(skillUses, SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
+					}
+				}
 			}
 			for _, child := range item {
 				walk(child)
@@ -157,7 +209,7 @@ func toolCalls(record map[string]any, index int, model, reasoning string) []Norm
 		}
 	}
 	walk(record)
-	return out
+	return calls, skillUses
 }
 
 func findVisibleMessage(record map[string]any) (string, string, bool) {
@@ -310,7 +362,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		metadata.Models = append(metadata.Models, *models[key])
 	}
 	deriveHookModels(bundle, &metadata)
-	deriveSkills(bundle, &metadata)
+	deriveSkills(bundle, view.NativeSkillUses, &metadata)
 	feedback := 0
 	for _, e := range bundle.SupplementalEvidence {
 		if e.Kind == EvidenceKindExplicitFeedback {
@@ -353,7 +405,7 @@ func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 	}
 }
 
-func deriveSkills(bundle SourceBundle, metadata *Metadata) {
+func deriveSkills(bundle SourceBundle, nativeSkillUses []SkillUse, metadata *Metadata) {
 	available := map[string]SkillSnapshot{}
 	used := map[string]SkillUse{}
 	recordUse := func(entry SkillUse) {
@@ -389,46 +441,11 @@ func deriveSkills(bundle SourceBundle, metadata *Metadata) {
 			recordUse(SkillUse{Name: name, SHA256: hash, Evidence: SkillUseEvidenceReadInference})
 		}
 	}
-	var walk func(any)
-	walk = func(value any) {
-		switch item := value.(type) {
-		case map[string]any:
-			kind, _ := item["type"].(string)
-			tool := firstString(item, "name", "tool_name")
-			if kind == "tool_use" && strings.EqualFold(tool, "skill") {
-				if input, ok := item["input"].(map[string]any); ok {
-					if name := firstString(input, "skill", "name"); name != "" {
-						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceNativeInvocation})
-					}
-				}
-			}
-			path := firstString(item, "file_path", "path")
-			if input, ok := item["input"].(map[string]any); ok && path == "" {
-				path = firstString(input, "file_path", "path")
-			}
-			command := firstString(item, "command", "arguments")
-			readTool := strings.EqualFold(tool, "read") || strings.EqualFold(tool, "read_file")
-			catRead := strings.HasPrefix(strings.TrimSpace(command), "cat ")
-			if readTool || catRead {
-				if name := skillNameFromPath(path); name != "" {
-					recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
-				} else if catRead {
-					if name := skillNameFromPath(command); name != "" {
-						recordUse(SkillUse{Name: name, Evidence: SkillUseEvidenceReadInference})
-					}
-				}
-			}
-			for _, child := range item {
-				walk(child)
-			}
-		case []any:
-			for _, child := range item {
-				walk(child)
-			}
-		}
-	}
-	for _, record := range bundle.NativeRecords {
-		walk(record)
+	// Native invocation/read-inference evidence is collected once, in
+	// toolCalls()'s per-record walk (see ParseNormalized), rather than a
+	// second traversal of bundle.NativeRecords here.
+	for _, entry := range nativeSkillUses {
+		recordUse(entry)
 	}
 	for _, entry := range available {
 		metadata.SkillsAvailable = append(metadata.SkillsAvailable, entry)

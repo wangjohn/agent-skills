@@ -518,3 +518,36 @@ func TestRunRecordsSupersededSourceOnRepublish(t *testing.T) {
 		t.Fatalf("superseded source must remain until retention deletes it: %v", err)
 	}
 }
+
+// TestRunFallsBackToCursorTextWhenJSONLIsUnrecognized guards against a
+// regression where CursorAdapter.FilterText — fully implemented and unit
+// tested in the archive package — was never actually reachable from the
+// real collection pipeline. The spec notes Cursor's hook-provided
+// transcript path can point to either a JSONL or a plain text transcript
+// depending on version; a text one must still publish, not be silently
+// dropped just because it isn't JSONL.
+func TestRunFallsBackToCursorTextWhenJSONLIsUnrecognized(t *testing.T) {
+	dir := t.TempDir()
+	textTranscript := "User: hello\nAssistant: hi there\n"
+	path := writeTranscript(t, dir, "cursor.txt", textTranscript)
+	local := newTestStore(t)
+	reg := registration(t, path)
+	reg.Harness = archive.Harness{Name: "cursor"}
+	if err := local.SaveRegistration(reg); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Published) != 1 || len(result.Errors) != 0 {
+		t.Fatalf("expected the Cursor text transcript to publish via the text fallback: %#v", result)
+	}
+	metadata := fetchMetadata(t, store, "cursor", "session-1")
+	if metadata.SourceBundle.Key == "" {
+		t.Fatalf("expected a verified source reference: %#v", metadata)
+	}
+}

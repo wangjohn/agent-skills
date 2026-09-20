@@ -275,6 +275,34 @@ func TestPreciseNativeSkillReadInference(t *testing.T) {
 	}
 }
 
+// TestCodexFunctionCallArgumentsSkillReadInference guards against a
+// regression where Codex's real function_call shape — arguments as a
+// JSON-encoded string, e.g. `{"path":"..."}`, rather than a nested "input"
+// object like Claude's tool_use — was never parsed, so a genuine Codex
+// SKILL.md read was silently missed. See the codex-function-call.jsonl
+// fixture for the real record shape this models.
+func TestCodexFunctionCallArgumentsSkillReadInference(t *testing.T) {
+	now := time.Now()
+	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{
+		// A leading turn_context record, as every real Codex transcript has:
+		// ParseNormalized skips it before calling toolCalls, so this also
+		// guards that skill detection (now derived from toolCalls' own walk,
+		// not a separate one) still fires for the record right after it.
+		{"type": "turn_context", "model": "gpt-6-astra"},
+		{"type": "function_call", "call_id": "call-1", "name": "read_file", "arguments": `{"path":"/skills/review-pr/SKILL.md"}`},
+	}}
+	m, err := BuildMetadata(bundle, "m", now, now, SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.SkillsUsed) != 1 || m.SkillsUsed[0].Name != "review-pr" || m.SkillsUsed[0].Evidence != SkillUseEvidenceReadInference {
+		t.Fatalf("expected Codex's real function_call/arguments shape to be recognized as a skill read: %#v", m.SkillsUsed)
+	}
+	if m.SkillDetection != SkillDetectionObserved {
+		t.Fatalf("SkillDetection=%q, want observed", m.SkillDetection)
+	}
+}
+
 func TestNativeAndSupplementalSkillUseDedupeByName(t *testing.T) {
 	now := time.Now()
 	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now},

@@ -145,19 +145,11 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	if err != nil {
 		return outcomeSkipped, err
 	}
-	file, err := os.Open(reg.TranscriptPath)
-	if err != nil {
-		return outcomeSkipped, fmt.Errorf("open transcript: %w", err)
-	}
-	filtered, err := adapter.FilterJSONL(file)
-	closeErr := file.Close()
+	filtered, err := filterTranscript(adapter, reg)
 	if err != nil {
 		// Unsafe format: never upload; the last published snapshot, if any,
 		// remains untouched and readable.
 		return outcomeSkipped, fmt.Errorf("filter transcript: %w", err)
-	}
-	if closeErr != nil {
-		return outcomeSkipped, fmt.Errorf("close transcript: %w", closeErr)
 	}
 
 	prevBundle, prevPublishedAt, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
@@ -284,6 +276,46 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}
 	return outcomePublished, nil
+}
+
+// filterTranscript filters reg's transcript with adapter, falling back to
+// CursorAdapter's text format when Cursor's own JSONL filter reports the
+// content isn't recognized as JSONL at all: the spec notes Cursor's
+// hook-provided transcript path can point to either format depending on
+// version, and the collector has no other way to tell which one it has
+// until it tries. Any other adapter, or any other kind of filter failure,
+// is returned as-is with no retry.
+func filterTranscript(adapter archive.Adapter, reg archive.SessionRegistration) (archive.FilteredTranscript, error) {
+	filtered, err := filterJSONLFile(adapter, reg.TranscriptPath)
+	if err == nil {
+		return filtered, nil
+	}
+	cursorAdapter, ok := adapter.(archive.CursorAdapter)
+	if !ok || !errors.Is(err, archive.ErrUnsafeSourceFormat) {
+		return archive.FilteredTranscript{}, err
+	}
+	file, openErr := os.Open(reg.TranscriptPath)
+	if openErr != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("open transcript: %w", openErr)
+	}
+	defer file.Close()
+	return cursorAdapter.FilterText(file, reg.SessionStartedAt)
+}
+
+func filterJSONLFile(adapter archive.Adapter, path string) (archive.FilteredTranscript, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("open transcript: %w", err)
+	}
+	filtered, err := adapter.FilterJSONL(file)
+	closeErr := file.Close()
+	if err != nil {
+		return archive.FilteredTranscript{}, err
+	}
+	if closeErr != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("close transcript: %w", closeErr)
+	}
+	return filtered, nil
 }
 
 // bundleEvidenceEqual reports whether two source bundles carry the same
