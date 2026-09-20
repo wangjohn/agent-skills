@@ -72,16 +72,9 @@ func ListMetadata(ctx context.Context, store storage.ObjectStore, prefix string,
 		if !strings.HasSuffix(object.Key, "/metadata.json") {
 			continue
 		}
-		data, err := store.Get(ctx, object.Key)
+		metadata, err := ReadMetadata(ctx, store, object.Key)
 		if err != nil {
-			return nil, fmt.Errorf("read metadata %q: %w", object.Key, err)
-		}
-		var metadata archive.Metadata
-		if err := json.Unmarshal(data, &metadata); err != nil {
-			return nil, fmt.Errorf("decode metadata %q: %w", object.Key, err)
-		}
-		if err := metadata.ValidateSourceReference(); err != nil {
-			return nil, fmt.Errorf("invalid metadata %q: %w", object.Key, err)
+			return nil, err
 		}
 		if matches(metadata, filter) {
 			results = append(results, metadata)
@@ -89,6 +82,48 @@ func ListMetadata(ctx context.Context, store storage.ObjectStore, prefix string,
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].CapturedAt.After(results[j].CapturedAt) })
 	return results, nil
+}
+
+// ReadMetadata reads and validates one metadata sidecar by its object key.
+// Like ListMetadata it downloads no transcript bundle.
+func ReadMetadata(ctx context.Context, store storage.ObjectStore, key string) (archive.Metadata, error) {
+	data, err := store.Get(ctx, key)
+	if err != nil {
+		return archive.Metadata{}, fmt.Errorf("read metadata %q: %w", key, err)
+	}
+	var metadata archive.Metadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return archive.Metadata{}, fmt.Errorf("decode metadata %q: %w", key, err)
+	}
+	if err := metadata.ValidateSourceReference(); err != nil {
+		return archive.Metadata{}, fmt.Errorf("invalid metadata %q: %w", key, err)
+	}
+	return metadata, nil
+}
+
+// FindMetadataKeys returns the metadata sidecar keys under prefix that
+// belong to one archive session ID, in key order. The harness segment of a
+// key is not known to a caller that only has the ID, so this lists keys
+// rather than deriving one with archive.MetadataObjectKey; it downloads
+// nothing. More than one result means the same ID was published under more
+// than one harness, which a caller should treat as ambiguous.
+func FindMetadataKeys(ctx context.Context, store storage.ObjectStore, prefix, archiveSessionID string) ([]string, error) {
+	if archiveSessionID == "" || strings.Contains(archiveSessionID, "/") {
+		return nil, fmt.Errorf("invalid archive session ID %q", archiveSessionID)
+	}
+	objects, err := store.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	suffix := "/" + archiveSessionID + "/metadata.json"
+	var keys []string
+	for _, object := range objects {
+		if strings.HasSuffix(object.Key, suffix) {
+			keys = append(keys, object.Key)
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 func matches(m archive.Metadata, f Filter) bool {
@@ -200,12 +235,8 @@ func LoadSource(ctx context.Context, store storage.ObjectStore, metadata archive
 // metadata-pointer refresh race after old source cleanup.
 func RefreshAndLoad(ctx context.Context, store storage.ObjectStore, metadataKey string, limits Limits) (archive.Metadata, archive.SourceBundle, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		data, err := store.Get(ctx, metadataKey)
+		m, err := ReadMetadata(ctx, store, metadataKey)
 		if err != nil {
-			return archive.Metadata{}, archive.SourceBundle{}, err
-		}
-		var m archive.Metadata
-		if err = json.Unmarshal(data, &m); err != nil {
 			return archive.Metadata{}, archive.SourceBundle{}, err
 		}
 		b, err := LoadSource(ctx, store, m, limits)

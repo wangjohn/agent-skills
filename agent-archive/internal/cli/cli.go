@@ -1,7 +1,8 @@
 // Package cli implements the agent-archive command-line interface: the
 // hidden `_hook` and `_collect` entry points a real installation's hooks
 // and LaunchAgent invoke, and the user-facing
-// setup/status/sync/pause/resume/uninstall commands. It is the only package that touches process-level state
+// setup/status/sync/pause/resume/uninstall and read-only list/show
+// commands. It is the only package that touches process-level state
 // (args, stdio, the real clock, the real home directory) directly; every
 // other package in this module stays free of that so it can be tested
 // without a real environment.
@@ -138,8 +139,20 @@ Usage:
   agent-archive pause     Persistently pause collection and uploads
   agent-archive resume    Resume scheduled work
   agent-archive uninstall Remove hooks, the collector, and local state (never the bucket)
+  agent-archive list      List archived sessions (metadata only)
+  agent-archive show ID   Print one archived session's metadata sidecar
   agent-archive --help    Show this help
   agent-archive --version Show the version
+
+Inspecting the archive:
+  agent-archive list [--harness NAME] [--model NAME] [--skill NAME]
+                     [--skill-usage used|available|eligible_no_use]
+                     [--since DATE|AGE] [--complete]
+  agent-archive show <archive-session-id> [--harness NAME] [--normalized]
+
+list and show read the configured bucket and print metadata only. show
+prints conversation content only with --normalized, which downloads and
+verifies the session's source bundle before printing its normalized view.
 
 No account or hosted service is used. You supply your own private
 Cloudflare R2 or Amazon S3 bucket during setup.
@@ -176,6 +189,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int 
 		return runSetupCommand(args[1:], stdin, stdout, stderr, env)
 	case "uninstall":
 		return runUninstallCommand(args[1:], stdin, stdout, stderr, env)
+	case "list":
+		return runListCommand(args[1:], stdout, stderr, env)
+	case "show":
+		return runShowCommand(args[1:], stdout, stderr, env)
 	default:
 		fmt.Fprintf(stderr, "agent-archive: unknown command %q\n\n%s", args[0], usage)
 		return 2
