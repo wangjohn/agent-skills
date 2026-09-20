@@ -131,7 +131,9 @@ before touching anything. On confirmation it:
 - deletes the R2 credentials setup stored in Keychain, when the
   configuration references them (an S3 setup stores none);
 - removes local state: config, per-session cache, and logs under
-  `~/.local/share/agent-archive` (or `$AGENT_ARCHIVE_HOME`).
+  `~/.local/share/agent-archive` (or `$AGENT_ARCHIVE_HOME`). Only files
+  agent-archive itself created are deleted; anything else in that
+  directory is left in place and named in the output.
 
 Nothing in your bucket is read, listed, or deleted: every archived session
 stays exactly where it is. The binary itself is left in place; remove it

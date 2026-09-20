@@ -161,10 +161,12 @@ func runUninstallCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, 
 		}
 		fail("remove local state", err)
 	} else {
-		removeErr := os.RemoveAll(home)
+		leftover, removeErr := removeLocalState(home)
 		unlock()
 		if removeErr != nil {
 			fail("remove local state", removeErr)
+		} else if len(leftover) > 0 {
+			fail("remove local state", fmt.Errorf("%s still contains entries agent-archive did not create (%s); remove it yourself once you have checked them", home, strings.Join(leftover, ", ")))
 		} else {
 			removed = append(removed, "local state ("+home+")")
 		}
@@ -187,13 +189,61 @@ func runUninstallCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, 
 	return 0
 }
 
-// checkRemovableHome refuses to delete a data directory that is obviously
+// checkRemovableHome refuses to touch a data directory that is obviously
 // not agent-archive's own: AGENT_ARCHIVE_HOME pointed at the user's home
-// directory or a filesystem root would otherwise make RemoveAll catastrophic.
+// directory or a filesystem root. removeLocalState is the second guard: it
+// only ever deletes entries agent-archive itself creates.
 func checkRemovableHome(home, userHome string) error {
 	clean := filepath.Clean(home)
 	if clean == filepath.Clean(userHome) || filepath.Dir(clean) == clean {
 		return fmt.Errorf("refusing to remove %s: not an agent-archive data directory", home)
 	}
 	return nil
+}
+
+// localStateEntries is every top-level entry agent-archive creates under its
+// data directory: internal/config's config.json, collector.LocalStore's
+// per-session directories, the lineage ledger, local.Lock's lock file, the
+// collector status file, and the LaunchAgent's log files. Keep it in sync
+// with those packages; an entry missing here is left behind by uninstall
+// (and reported), never silently deleted.
+var localStateEntries = []string{
+	"config.json",
+	"registrations", "requests", "published", "sessions", "superseded",
+	"status.json",
+	"collector.lock", "collector.log", "collector-error.log",
+}
+
+// removeLocalState deletes agent-archive's own entries under home (see
+// localStateEntries, plus local.WriteBytes's ".pending-*" temp files) and
+// then the directory itself. It never deletes anything else: a data
+// directory a user pointed AGENT_ARCHIVE_HOME at may hold their own files,
+// and those are returned as leftover, with the directory left in place,
+// rather than removed.
+func removeLocalState(home string) (leftover []string, err error) {
+	entries, err := os.ReadDir(home)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for _, name := range localStateEntries {
+		known[name] = true
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !known[name] && !strings.HasPrefix(name, ".pending-") {
+			leftover = append(leftover, name)
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(home, name)); err != nil {
+			return nil, err
+		}
+	}
+	if len(leftover) > 0 {
+		return leftover, nil
+	}
+	return nil, os.Remove(home)
 }
