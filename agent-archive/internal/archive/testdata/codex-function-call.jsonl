@@ -1,0 +1,3 @@
+{"type":"turn_context","id":"turn-1","model":"gpt-6-astra","model_provider":"openai","reasoning_effort":"high"}
+{"type":"response_item","id":"item-a","timestamp":"2026-09-17T18:00:00Z","model":"gpt-6-astra","model_provider":"openai","reasoning_effort":"high","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect the file."},{"type":"reasoning","text":"hidden thought"}]}}
+{"type":"response_item","id":"item-b","parentUuid":"item-a","payload":{"type":"function_call","call_id":"call-1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}
