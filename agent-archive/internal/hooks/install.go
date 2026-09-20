@@ -21,16 +21,9 @@ type Change struct {
 func Plan(home, executable string, harnesses []string) ([]Change, error) {
 	changes := []Change{}
 	for _, h := range harnesses {
-		relative := ""
-		switch h {
-		case "codex":
-			relative = ".codex/hooks.json"
-		case "claude":
-			relative = ".claude/settings.json"
-		case "cursor":
-			relative = ".cursor/hooks.json"
-		default:
-			return nil, errors.New("unsupported harness")
+		relative, err := hookFile(h)
+		if err != nil {
+			return nil, err
 		}
 		path := filepath.Join(home, relative)
 		before, err := os.ReadFile(path)
@@ -72,6 +65,59 @@ func Apply(changes []Change) error {
 	}
 	return nil
 }
+
+// PlanRemoval prepares the inverse of Plan for uninstall: for each harness,
+// a Change whose After is the current file with only our own handlers
+// stripped (see Remove). A harness whose hook file is missing, or whose file
+// never contained our entries, yields no Change at all, so an unrelated
+// configuration is never rewritten or reformatted. Apply the result with
+// Apply, which keeps its refuse-on-concurrent-edit and rollback behavior.
+func PlanRemoval(home string, harnesses []string) ([]Change, error) {
+	changes := []Change{}
+	for _, h := range harnesses {
+		relative, err := hookFile(h)
+		if err != nil {
+			return nil, err
+		}
+		path := filepath.Join(home, relative)
+		before, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, errors.New("cannot read existing hook configuration")
+		}
+		after, removed, err := Remove(before, h)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", relative, err)
+		}
+		if !removed {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, Change{path, before, after, true, info.Mode().Perm()})
+	}
+	return changes, nil
+}
+
+// hookFile is the per-harness hook configuration file, relative to the
+// user's home directory.
+func hookFile(harness string) (string, error) {
+	switch harness {
+	case "codex":
+		return ".codex/hooks.json", nil
+	case "claude":
+		return ".claude/settings.json", nil
+	case "cursor":
+		return ".cursor/hooks.json", nil
+	default:
+		return "", errors.New("unsupported harness")
+	}
+}
+
 func Rollback(changes []Change) error { return rollback(changes) }
 func rollback(changes []Change) error {
 	var failures []error

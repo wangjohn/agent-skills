@@ -59,6 +59,7 @@ func setupTestEnv(t *testing.T, home, userHome string, keychain *fakeKeychain, n
 	env.Executable = func() (string, error) { return "/opt/agent-archive/bin/agent-archive", nil }
 	env.DetectHarnesses = func(string) []string { return nil }
 	env.LoadLaunchAgent = func(string) error { return nil }
+	env.UnloadLaunchAgent = func(string) error { return nil }
 	env.Keychain = func() (credentials.CredentialStore, error) { return keychain, nil }
 	return env
 }
