@@ -33,7 +33,7 @@ Each skill is a directory whose name matches the `name` field in `SKILL.md`. Kee
 
 Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This repo is the portable source of truth.
 
-`review-pr` prepares a human review guide to a PR's architecture, models, tradeoffs, and consequential design decisions, with code-first explanations, simple language, diagrams when useful, and focused review questions. Try: “Use review-pr to show me the decisions that deserve my attention in PR <url>.”
+`review-pr` runs native code review and design review in separate contexts, then combines them into a human guide: change map, design decisions, proposed fixes, and coverage. It uses code-first explanations and supports design-only requests. Try: “Use review-pr to review PR <url>.”
 
 ## Add a skill
 
@@ -48,8 +48,11 @@ Or tell an agent to follow the `create-skill` skill in this repo.
 
 ```bash
 python3 scripts/validate.py
+python3 -m unittest discover -s tests -v
 ```
 
-## Private agent-run archive
+## Private skill history
 
-The proposed [product and engineering specification](docs/agent-run-archive-spec.md) covers the `agent-archive` CLI, onboarding for private R2 and S3 storage, Codex/Claude Code/Cursor capture, metadata, privacy, recovery, and rollout. This is a plan, not an implemented release.
+The proposed cross-application design is documented in the [agent-run archive product and engineering spec](docs/agent-run-archive-spec.md), including process maps, metadata, storage, recovery, and rollout. It replaces the prototype design below; it is not yet implemented.
+
+The optional [skill-run recorder](docs/skill-runs.md) captures applied skills in Codex and uploads records to a private Cloudflare R2 bucket. Install it separately on each Mac. Run data and credentials stay outside this public repository. This provides evidence for a future `evaluate-skill` skill; it does not evaluate or change skills automatically.
