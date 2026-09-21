@@ -417,6 +417,25 @@ func TestMergeSupplementalEvidenceRetainsChangedInventoryHistory(t *testing.T) {
 	}
 }
 
+func TestDeriveSkillsKeepsInventoryHistoryWithoutClaimingUse(t *testing.T) {
+	now := time.Date(2026, 9, 20, 1, 0, 0, 0, time.UTC)
+	bundle := SourceBundle{
+		SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p",
+		Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "jsonl", FilterVersion: FilterVersion, CapturedAt: now},
+		SupplementalEvidence: []SupplementalEvidence{
+			{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project_agents", "root_status": "present", "skills": []any{map[string]any{"name": "review", "sha256": "old"}}}},
+			{Kind: EvidenceKindSkillInventory, ObservedAt: now.Add(time.Hour), Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project_agents", "root_status": "absent", "skills": []any{}}},
+		},
+	}
+	metadata, err := BuildMetadata(bundle, "machine", now, now.Add(2*time.Hour), SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.SkillsAvailable) != 1 || metadata.SkillsAvailable[0].Name != "review" || len(metadata.SkillsUsed) != 0 || metadata.SkillDetection != SkillDetectionUnavailable {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
 func TestMergeSupplementalEvidenceDeduplicatesRetriesButKeepsIntentionalFeedback(t *testing.T) {
 	now := time.Now().UTC()
 	retried := SupplementalEvidence{Kind: EvidenceKindFinalResponse, ObservedAt: now, Provenance: "hook:codex:stop", Payload: map[string]any{"turn_id": "t1", "text": "done"}}

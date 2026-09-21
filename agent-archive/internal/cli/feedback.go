@@ -61,10 +61,11 @@ func runFeedbackCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: feedback: resolve home: %v\n", err)
 		return 1
 	}
-	if _, found, err := config.Load(home); err != nil {
+	cfg, found, err := config.Load(home)
+	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: feedback: load config: %v\n", err)
 		return 1
-	} else if !found {
+	} else if !found || !cfg.Archive.Enabled {
 		fmt.Fprintln(stderr, "agent-archive: feedback: not set up yet; run `agent-archive setup` first")
 		return 1
 	}
@@ -73,11 +74,16 @@ func runFeedbackCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: feedback: open local store: %v\n", err)
 		return 1
 	}
-	if _, found, err := store.LoadRegistration(sessionID); err != nil {
+	registration, found, err := store.LoadRegistration(sessionID)
+	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: feedback: %v\n", err)
 		return 1
 	} else if !found {
 		fmt.Fprintf(stderr, "agent-archive: feedback: no local session %q\n", sessionID)
+		return 1
+	}
+	if !cfg.AcceptSession(registration) {
+		fmt.Fprintf(stderr, "agent-archive: feedback: session %q is no longer eligible under the current setup\n", sessionID)
 		return 1
 	}
 	now := env.now()

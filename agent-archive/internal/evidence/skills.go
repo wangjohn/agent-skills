@@ -97,9 +97,10 @@ func skillRoots(options SkillOptions) []skillRoot {
 func observeRoot(harness string, root skillRoot, observedAt time.Time, remainingSnapshotBytes *int64) ([]archive.SupplementalEvidence, error) {
 	entries, err := os.ReadDir(root.path)
 	if errors.Is(err, os.ErrNotExist) {
-		// Absence is not evidence that no skills were available. Emit nothing
-		// and leave coverage unknown.
-		return nil, nil
+		// Root-local absence is observable and lets a later pass record removal
+		// of every skill previously seen in this scope. Installed-only coverage
+		// still says nothing about what the harness discovered or invoked.
+		return []archive.SupplementalEvidence{inventoryObservation(harness, root.scope, "absent", nil, true, observedAt)}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s skill inventory: %w", root.scope, err)
@@ -178,15 +179,15 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 		snapshots = append(snapshots, filtered[0])
 	}
 	totalOmittedEntries := omittedEntries + uninspectedEntries
+	rootStatus := "present"
 	if len(inventory) == 0 && totalOmittedEntries == 0 {
-		// An empty directory does not establish that the harness had no
-		// bundled, synced, managed, or otherwise non-filesystem skills.
-		return nil, nil
+		rootStatus = "empty"
 	}
 	inventoryPayload := map[string]any{
 		"coverage": string(archive.SkillCoverageInstalledOnly), "scope": root.scope, "skills": inventory,
 		"inventory_complete": totalOmittedEntries == 0,
-		"uncertainty":        "bounded filesystem inventory does not prove discovery or eligibility in this session",
+		"root_status":        rootStatus,
+		"uncertainty":        "root-local filesystem inventory does not prove discovery, eligibility, or invocation; other roots and plugin-managed inventories may not have been inspected",
 	}
 	if totalOmittedEntries > 0 {
 		inventoryPayload["truncated"] = true
@@ -200,6 +201,24 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 		Payload: inventoryPayload,
 	}}
 	return append(result, snapshots...), nil
+}
+
+func inventoryObservation(harness, scope, rootStatus string, skills []any, complete bool, observedAt time.Time) archive.SupplementalEvidence {
+	if skills == nil {
+		skills = []any{}
+	}
+	return archive.SupplementalEvidence{
+		Kind: archive.EvidenceKindSkillInventory, ObservedAt: observedAt,
+		Provenance: "filesystem:" + strings.ToLower(strings.TrimSpace(harness)),
+		Payload: map[string]any{
+			"coverage":           string(archive.SkillCoverageInstalledOnly),
+			"scope":              scope,
+			"skills":             skills,
+			"inventory_complete": complete,
+			"root_status":        rootStatus,
+			"uncertainty":        "root-local filesystem inventory does not prove discovery, eligibility, or invocation; other roots and plugin-managed inventories may not have been inspected",
+		},
+	}
 }
 
 func readBounded(path string, limit int64) ([]byte, error) {

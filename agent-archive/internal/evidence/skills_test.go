@@ -26,13 +26,13 @@ func TestObserveSkillsHashesOriginalAndFiltersSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Kind != archive.EvidenceKindSkillInventory || got[1].Kind != archive.EvidenceKindSkillSnapshot {
+	if len(got) != 4 || got[2].Kind != archive.EvidenceKindSkillInventory || got[3].Kind != archive.EvidenceKindSkillSnapshot {
 		t.Fatalf("evidence=%#v", got)
 	}
-	if got[0].Payload["coverage"] != string(archive.SkillCoverageInstalledOnly) {
-		t.Fatalf("inventory=%#v", got[0])
+	if got[2].Payload["coverage"] != string(archive.SkillCoverageInstalledOnly) || got[2].Payload["root_status"] != "present" {
+		t.Fatalf("inventory=%#v", got[2])
 	}
-	snapshot := got[1].Payload
+	snapshot := got[3].Payload
 	if snapshot["name"] != "reviewed-name" || len(snapshot["sha256"].(string)) != 64 || snapshot["redacted"] != true {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
@@ -41,10 +41,21 @@ func TestObserveSkillsHashesOriginalAndFiltersSnapshot(t *testing.T) {
 	}
 }
 
-func TestObserveSkillsAbsentRootsLeaveKnowledgeUnknown(t *testing.T) {
+func TestObserveSkillsAbsentRootsAreScopedAndLeaveUseKnowledgeUnknown(t *testing.T) {
+	now := time.Now().UTC()
 	got, err := ObserveSkills(SkillOptions{Harness: "claude", ProjectRoot: t.TempDir(), UserHome: t.TempDir(), ObservedAt: time.Now()})
-	if err != nil || len(got) != 0 {
+	if err != nil || len(got) != 2 {
 		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	for _, item := range got {
+		if item.Kind != archive.EvidenceKindSkillInventory || item.Payload["root_status"] != "absent" || item.Payload["coverage"] != string(archive.SkillCoverageInstalledOnly) || len(item.Payload["skills"].([]any)) != 0 {
+			t.Fatalf("observation=%#v", item)
+		}
+	}
+	bundle := archive.SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: archive.SourceCapture{Harness: archive.Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "jsonl", FilterVersion: archive.FilterVersion, CapturedAt: now}, SupplementalEvidence: got}
+	metadata, err := archive.BuildMetadata(bundle, "machine", now, now, archive.SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, archive.ParserInfo{})
+	if err != nil || metadata.SkillDetection != archive.SkillDetectionUnavailable || len(metadata.SkillsUsed) != 0 {
+		t.Fatalf("metadata=%#v err=%v", metadata, err)
 	}
 }
 
@@ -58,8 +69,62 @@ func TestObserveSkillsDoesNotWalkUnrelatedProjectDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := ObserveSkills(SkillOptions{Harness: "codex", ProjectRoot: project, UserHome: t.TempDir(), ObservedAt: time.Now()})
-	if err != nil || len(got) != 0 {
+	if err != nil || len(got) != 3 {
 		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	for _, item := range got {
+		if item.Kind != archive.EvidenceKindSkillInventory || item.Payload["root_status"] != "absent" {
+			t.Fatalf("unexpected evidence=%#v", got)
+		}
+	}
+}
+
+func TestObserveSkillsRecordsRemovalAndDeduplicatesRepeatedAbsence(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".agents", "skills")
+	dir := filepath.Join(root, "review")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: review\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 9, 21, 1, 0, 0, 0, time.UTC)
+	present, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	absent, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: first.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := archive.MergeSupplementalEvidence(present, absent)
+	if len(merged) != len(present)+1 {
+		t.Fatalf("removal was not recorded exactly once: present=%#v absent=%#v merged=%#v", present, absent, merged)
+	}
+	repeated, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: first.Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again := archive.MergeSupplementalEvidence(merged, repeated); len(again) != len(merged) {
+		t.Fatalf("repeated absence changed history: before=%#v after=%#v", merged, again)
+	}
+}
+
+func TestObserveSkillsRecordsExistingEmptyRoot(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".agents", "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Payload["root_status"] != "empty" || got[0].Payload["inventory_complete"] != true || len(got[0].Payload["skills"].([]any)) != 0 {
+		t.Fatalf("empty root=%#v", got[0])
 	}
 }
 
@@ -143,7 +208,7 @@ func TestObserveSkillsLabelsUnscannedLegacySubtrees(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Payload["scope"] != "user_codex_legacy" || got[0].Payload["inventory_complete"] != false || got[0].Payload["omitted_count"] != float64(1) {
+	if len(got) != 2 || got[1].Payload["scope"] != "user_codex_legacy" || got[1].Payload["inventory_complete"] != false || got[1].Payload["omitted_count"] != float64(1) {
 		t.Fatalf("evidence=%#v", got)
 	}
 }
