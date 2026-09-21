@@ -1,6 +1,6 @@
 # Design and architecture review
 
-Review the supplied snapshot independently. Do not invoke the parent skill, launch another reviewer, or read another worker's output. Return ready-to-use change-map and design sections, any incidental defects, and brief coverage notes to the coordinator. It assembles the final report; omit a separate introduction or overall PR verdict.
+Review the supplied snapshot independently. Do not invoke the parent skill, launch another reviewer, or read another worker's output. Return a short change summary, ready-to-use change-map and design sections, any incidental defects, and brief coverage notes to the coordinator. It assembles the final report; omit a longer introduction or overall PR verdict.
 
 ## Inspect the decisions that matter
 
@@ -22,6 +22,10 @@ Look for these decisions when present; do not force every category into the repo
 For costly-to-reverse choices, name the commitment: persisted data, public consumers, coordinated deployments, or another team's ownership. Where relevant, inspect mixed-version behavior, backfills, and the point where rollback becomes difficult. Distinguish reverting code from undoing its effects. Avoid generic rollout checklists or designs for hypothetical scale.
 
 Include sound choices worth affirming when they establish an important commitment. Group edits by decision, not by file. Omit routine plumbing, formatting, and generated churn from decision analysis. Flag clear consequential defects separately with evidence, without turning the design pass into another bug hunt.
+
+## Return a short change summary
+
+Before the map, state in two or three sentences what the change does and how, from the code: the behavior that changes, the main mechanism, and the components involved. Name real symbols and paths. Quote the author's purpose only when the description states it, labeled as the author's statement, and do not repeat it as fact. Do not rank the change, give a verdict, or preview your decisions here; the coordinator adds the review headline.
 
 ## Return a compact change map
 
