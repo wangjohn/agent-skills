@@ -163,6 +163,15 @@ func applySetup(home, userHome, executable string, old config.Config, next *conf
 	if !reflect.DeepEqual(current, old) {
 		return fmt.Errorf("settings changed while setup was open; restart setup to review the current settings")
 	}
+	// Operational ownership comes from committed state, never a resumable
+	// draft. A crash after commit can leave a pre-commit draft on disk.
+	next.DestinationSince = old.DestinationSince
+	next.PreviousDestinations = append([]credentials.Config(nil), old.PreviousDestinations...)
+	for _, ref := range old.RetiredCredentialRefs {
+		if !containsString(next.RetiredCredentialRefs, ref) {
+			next.RetiredCredentialRefs = append(next.RetiredCredentialRefs, ref)
+		}
+	}
 	if old.MachineID != "" && !destinationEqual(old.Storage, next.Storage) {
 		pending, err := pendingSessions(home, old)
 		if err != nil {
@@ -198,6 +207,12 @@ func applySetup(home, userHome, executable string, old config.Config, next *conf
 	next.Archive.MachineID = next.MachineID
 	next.Archive.SchemaVersion = 1
 	for i := range next.Archive.Projects {
+		for _, prior := range old.Archive.Projects {
+			if prior.Root == next.Archive.Projects[i].Root {
+				next.Archive.Projects[i].ActivatedAt = prior.ActivatedAt
+				break
+			}
+		}
 		if next.Archive.Projects[i].ActivatedAt.IsZero() {
 			next.Archive.Projects[i].ActivatedAt = env.now().UTC()
 		}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +179,74 @@ func TestStatusDetectsPartialHooks(t *testing.T) {
 	view, err := readStatus(env)
 	if err != nil || view.State != "Needs attention" || view.Apps[0].Hooks == "installed" {
 		t.Fatalf("view=%+v err=%v", view, err)
+	}
+}
+
+func TestResumeDraftLeftAfterDestinationCommitPreservesOwnership(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	now := time.Now().UTC()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
+	setupRun(t, env, s3SetupInput("original", "us-east-1", "profile", true, false, false, project), 0)
+	old, _, _ := config.Load(home)
+	stale := setupDraft{Version: 1, Step: 2, Config: old}
+	stale.Config.Storage.Bucket = "new-bucket"
+	// Persist the pre-commit draft, then commit without the wizard's deletion:
+	// exactly the state left by a crash or failed draft removal after apply.
+	if err := local.Write(filepath.Join(home, "setup-draft.json"), stale); err != nil {
+		t.Fatal(err)
+	}
+	next := stale.Config
+	exe, err := env.executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySetup(home, userHome, exe, old, &next, env); err != nil {
+		t.Fatal(err)
+	}
+	committed, _, _ := config.Load(home)
+	if committed.DestinationSince.IsZero() {
+		t.Fatal("switch did not establish boundary")
+	}
+	env.Now = func() time.Time { return now.Add(time.Hour) }
+	setupRun(t, env, "continue\ny\n", 0)
+	resumed, _, _ := config.Load(home)
+	if !resumed.DestinationSince.Equal(committed.DestinationSince) || !reflect.DeepEqual(resumed.PreviousDestinations, committed.PreviousDestinations) {
+		t.Fatalf("ownership changed: before=%+v after=%+v", committed, resumed)
+	}
+	if resumed.AcceptSession(archive.SessionRegistration{SessionStartedAt: now.Add(-time.Minute), Harness: archive.Harness{Name: "codex"}, ProjectRoot: resumed.Archive.Projects[0].Root}) {
+		t.Fatal("retired session became eligible")
+	}
+}
+
+func TestStatusPreservesPublicationDuringRateLimitedUpdate(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	now := time.Now().UTC()
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), now)
+	setupRun(t, env, s3SetupInput("bucket", "us-east-1", "profile", true, false, false, project), 0)
+	path := writeCodexTranscript(t, project)
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnePass(env, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(b), "visible", "updated")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env.Now = func() time.Time { return now.Add(time.Second) }
+	if _, err := runOnePass(env, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := readStatus(env)
+	if err != nil || after.Apps[0].LastPublishedAt.IsZero() || !after.Apps[0].LastPublishedAt.Equal(before.Apps[0].LastPublishedAt) || after.State == "Waiting for capture" || after.Collector.PendingCount != 1 {
+		t.Fatalf("status=%+v err=%v", after, err)
 	}
 }

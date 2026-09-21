@@ -137,7 +137,7 @@ func readStatus(env Env) (view statusView, err error) {
 			if found && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
-			if state == collector.CacheStatusPublished {
+			if state == collector.CacheStatusPublished || (state == collector.CacheStatusRateLimited && !at.IsZero()) {
 				app.State = "published; source verified"
 				if at.After(app.LastPublishedAt) {
 					app.LastPublishedAt = at
