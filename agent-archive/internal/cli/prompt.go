@@ -40,9 +40,32 @@ func (p *prompter) line(label string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// withDefault prompts once, returning def when the answer is blank.
+// help prints guidance for the prompt that follows: the first line flush
+// with the prompts, any continuation lines indented beneath it.
+func (p *prompter) help(lines ...string) {
+	for i, l := range lines {
+		if i > 0 {
+			l = "  " + l
+		}
+		fmt.Fprintln(p.out, l)
+	}
+}
+
+// options prints an indented list of choices under a question.
+func (p *prompter) options(lines ...string) {
+	for _, l := range lines {
+		fmt.Fprintln(p.out, "  "+l)
+	}
+}
+
+// withDefault prompts once, returning def when the answer is blank. A blank
+// default shows no bracketed value rather than a confusing "[]".
 func (p *prompter) withDefault(label, def string) (string, error) {
-	answer, err := p.line(fmt.Sprintf("%s [%s]: ", label, def))
+	prompt := label + ": "
+	if def != "" {
+		prompt = fmt.Sprintf("%s [%s]: ", label, def)
+	}
+	answer, err := p.line(prompt)
 	if err != nil {
 		return "", err
 	}

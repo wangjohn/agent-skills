@@ -27,6 +27,15 @@ Macs are supported.
    sudo mv agent-archive-darwin-* /usr/local/bin/agent-archive
    ```
 
+   On an Apple Silicon Mac with Homebrew, `/usr/local/bin` may not exist
+   at all. Either create it first (`sudo mkdir -p /usr/local/bin`) or use
+   Homebrew's directory, which is already on your `PATH` and needs no
+   `sudo`:
+
+   ```sh
+   mv agent-archive-darwin-* /opt/homebrew/bin/agent-archive
+   ```
+
 4. Confirm it runs and check the version:
 
    ```sh
@@ -137,7 +146,8 @@ before touching anything. On confirmation it:
 
 Nothing in your bucket is read, listed, or deleted: every archived session
 stays exactly where it is. The binary itself is left in place; remove it
-with `rm /usr/local/bin/agent-archive` (or wherever you put it).
+with `rm /usr/local/bin/agent-archive` (or `rm /opt/homebrew/bin/agent-archive`,
+or wherever you put it).
 
 If the command cannot complete (for example, launchd is not reachable or a
 hook file was edited concurrently), it says which step failed and leaves the

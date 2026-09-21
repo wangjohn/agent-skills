@@ -134,11 +134,11 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	fmt.Fprintln(stdout, "  private. Check your provider's public-access settings yourself.")
 
 	detected := env.detectHarnesses(userHome)
-	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "\nWhich applications should sessions be captured from?")
 	if len(detected) > 0 {
-		fmt.Fprintf(stdout, "Detected applications: %s\n", strings.Join(detected, ", "))
+		p.help(fmt.Sprintf("Detected: %s. Including one adds hooks to its config; nothing else changes.", strings.Join(harnessDisplayNames(detected), ", ")))
 	} else {
-		fmt.Fprintln(stdout, "No applications detected automatically; you can still include any of them.")
+		p.help("None detected. Including one adds hooks to its config; nothing else changes.")
 	}
 	harnesses, err := promptHarnesses(p, detected, existing.Harnesses)
 	if err != nil {
@@ -150,7 +150,8 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 		return 1
 	}
 
-	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "\nWhich project directories should be captured?")
+	p.help("Absolute paths, one per line. Only sessions started in exactly these directories are archived.")
 	projects, err := promptProjects(p, existing.Archive.Projects, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
@@ -162,6 +163,7 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	}
 
 	fmt.Fprintln(stdout)
+	p.help("Yes keeps every session; No keeps only sessions where a skill was used.")
 	captureNoSkill, err := p.yesNo("Capture sessions without detected skill use?", !existing.RequireSkillUse || existing.MachineID == "")
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
@@ -171,6 +173,7 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	if retentionDefault <= 0 {
 		retentionDefault = defaultRetentionDays
 	}
+	p.help("How long should sessions stay in the bucket? Older ones are deleted.")
 	retentionDays, err := p.intWithDefault("Retention (days)", retentionDefault)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
@@ -200,7 +203,9 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 	fmt.Fprintf(stdout, "Projects:      %d included\n", len(projects))
 	fmt.Fprintln(stdout, "History:       New sessions only")
 	fmt.Fprintf(stdout, "Retention:     %d days\n", retentionDays)
-	enable, err := p.yesNo("\nEnable automatic capture?", true)
+	fmt.Fprintln(stdout)
+	p.help("Ready to enable? This installs the hooks and a login LaunchAgent that publishes about once a minute.")
+	enable, err := p.yesNo("Enable automatic capture?", true)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
 		return 1
@@ -297,7 +302,9 @@ func rollbackHooksAndLaunchAgent(env Env, stderr io.Writer, changes []hooks.Chan
 // answer when existing R2 credentials are already on file keeps them
 // rather than overwriting Keychain with an empty secret.
 func promptStorage(p *prompter, existing credentials.Config) (credentials.Config, credentials.R2Credentials, bool, error) {
-	choice, err := p.withDefault("Where should sessions be stored? (1=Cloudflare R2, 2=Amazon S3)", defaultProviderChoice(existing.Provider))
+	fmt.Fprintln(p.out, "Where should sessions be stored?")
+	p.options("1) Cloudflare R2", "2) Amazon S3")
+	choice, err := p.withDefault("Choice", defaultProviderChoice(existing.Provider))
 	if err != nil {
 		return credentials.Config{}, credentials.R2Credentials{}, false, err
 	}
@@ -305,15 +312,26 @@ func promptStorage(p *prompter, existing credentials.Config) (credentials.Config
 	switch strings.ToLower(choice) {
 	case "1", "r2":
 		cfg.Provider = credentials.ProviderR2
+		fmt.Fprintln(p.out)
+		p.help("Which existing R2 bucket? Listed under R2 Object Storage > Overview in the Cloudflare dashboard.")
 		if cfg.Bucket, err = p.withDefault("Bucket name", existing.Bucket); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
-		if cfg.R2AccountID, err = p.withDefault("R2 account ID (blank if supplying the full endpoint)", existing.R2AccountID); err != nil {
+		if cfg.Bucket == "" {
+			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("bucket name is required")
+		}
+		p.help("What is your Cloudflare account ID? Shown at the right of the R2 Overview page. Blank if you give the endpoint instead.")
+		if cfg.R2AccountID, err = p.withDefault("R2 account ID", existing.R2AccountID); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
-		if cfg.R2Endpoint, err = p.withDefault("R2 endpoint (blank to derive from account ID)", existing.R2Endpoint); err != nil {
+		p.help("What is the bucket's S3 endpoint? Shown under the bucket's Settings > S3 API. Blank to derive it from the account ID.")
+		if cfg.R2Endpoint, err = p.withDefault("R2 endpoint", existing.R2Endpoint); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
+		if cfg.R2AccountID == "" && cfg.R2Endpoint == "" {
+			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("either the R2 account ID or the R2 endpoint is required")
+		}
+		p.help("Where in the bucket should sessions go? A folder-style prefix.")
 		if cfg.Prefix, err = p.withDefault("Prefix", firstNonEmpty(existing.Prefix, defaultPrefix)); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
@@ -327,6 +345,10 @@ func promptStorage(p *prompter, existing credentials.Config) (credentials.Config
 			cfg.R2CredentialRef = existing.R2CredentialRef
 			return cfg, credentials.R2Credentials{}, false, nil
 		}
+		p.help(
+			"Which R2 API token? Create one under R2 > Manage R2 API Tokens with \"Object Read & Write\" scoped to this bucket.",
+			"The secret is stored in macOS Keychain. It is visible on screen as you type it.",
+		)
 		accessKeyID, err := p.line("Access key ID: ")
 		if err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
@@ -342,15 +364,29 @@ func promptStorage(p *prompter, existing credentials.Config) (credentials.Config
 		return cfg, credentials.R2Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretKey}, true, nil
 	case "2", "s3":
 		cfg.Provider = credentials.ProviderS3
+		fmt.Fprintln(p.out)
+		p.help("Which existing S3 bucket? Listed under S3 > Buckets in the AWS console, or by `aws s3 ls --profile <name>`.")
 		if cfg.Bucket, err = p.withDefault("Bucket name", existing.Bucket); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
+		if cfg.Bucket == "" {
+			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("bucket name is required")
+		}
+		p.help("Which region is the bucket in? For example us-east-1.")
 		if cfg.Region, err = p.withDefault("AWS region", existing.Region); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
+		if cfg.Region == "" {
+			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("AWS region is required")
+		}
+		p.help("Which AWS profile can read, write, list, and delete in the bucket? Only its name is stored.")
 		if cfg.AWSProfile, err = p.withDefault("AWS profile", existing.AWSProfile); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
+		if cfg.AWSProfile == "" {
+			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("AWS profile is required")
+		}
+		p.help("Where in the bucket should sessions go? A folder-style prefix.")
 		if cfg.Prefix, err = p.withDefault("Prefix", firstNonEmpty(existing.Prefix, defaultPrefix)); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
@@ -382,7 +418,7 @@ func promptHarnesses(p *prompter, detected, existing []string) ([]string, error)
 	var included []string
 	for _, h := range allHarnesses {
 		def := containsString(detected, h) || containsString(existing, h)
-		include, err := p.yesNo(fmt.Sprintf("Include %s?", h), def)
+		include, err := p.yesNo(fmt.Sprintf("Include %s?", harnessDisplayName(h)), def)
 		if err != nil {
 			return nil, err
 		}
@@ -391,6 +427,45 @@ func promptHarnesses(p *prompter, detected, existing []string) ([]string, error)
 		}
 	}
 	return included, nil
+}
+
+// harnessDisplayName maps an internal harness name to what its users call it.
+func harnessDisplayName(h string) string {
+	switch h {
+	case "codex":
+		return "Codex"
+	case "claude":
+		return "Claude Code"
+	case "cursor":
+		return "Cursor"
+	}
+	return h
+}
+
+func harnessDisplayNames(hs []string) []string {
+	out := make([]string, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, harnessDisplayName(h))
+	}
+	return out
+}
+
+// normalizeProjectRoot expands a leading ~ and cleans the path so the stored
+// root matches the working directory a hook later reports. It rejects
+// relative paths: a root that depends on where setup was run would silently
+// never match anything.
+func normalizeProjectRoot(root string) (string, error) {
+	if root == "~" || strings.HasPrefix(root, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand ~ in %q: %w", root, err)
+		}
+		root = filepath.Join(home, strings.TrimPrefix(root, "~"))
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("project directory %q must be an absolute path", root)
+	}
+	return filepath.Clean(root), nil
 }
 
 func containsString(values []string, target string) bool {
@@ -420,11 +495,15 @@ func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.
 			kept = append(kept, project)
 		}
 	}
-	added, err := p.lines("Add project roots to include (one per line, blank line to finish):")
+	added, err := p.lines("Add project directories (blank line to finish):")
 	if err != nil {
 		return nil, err
 	}
 	for _, root := range added {
+		root, err = normalizeProjectRoot(root)
+		if err != nil {
+			return nil, err
+		}
 		kept = append(kept, archive.ProjectActivation{
 			ProjectID: archive.ProjectID(root), Root: root, Included: true, ActivatedAt: now,
 		})
