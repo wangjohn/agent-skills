@@ -17,7 +17,7 @@ import (
 
 func TestVerifyAccessUsesUniqueObjectAndCleansUp(t *testing.T) {
 	store := NewMemoryStore()
-	if err := VerifyAccess(context.Background(), store, ""); err != nil {
+	if err := VerifyAccess(context.Background(), store); err != nil {
 		t.Fatal(err)
 	}
 	objects, err := store.List(context.Background(), "")

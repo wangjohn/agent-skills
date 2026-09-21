@@ -87,10 +87,11 @@ func SHA256Hex(data []byte) string {
 }
 
 // VerifyAccess performs the setup round trip required by the product spec.
-// It creates a unique object under prefix, reads and verifies it, confirms it
+// It creates a unique relative object key; the store applies its configured
+// prefix. It reads and verifies the object, confirms it
 // appears in List, and removes it. No bucket-admin operation is required.
-func VerifyAccess(ctx context.Context, store ObjectStore, prefix string) error {
-	key := uniqueSetupKey(prefix)
+func VerifyAccess(ctx context.Context, store ObjectStore) error {
+	key := uniqueSetupKey()
 	payload := []byte(`{"agent_archive_setup_test":true}`)
 	cleanup := func() error { return store.Delete(ctx, key) }
 	if err := store.Put(ctx, key, payload); err != nil {
