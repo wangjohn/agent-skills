@@ -41,18 +41,19 @@ type statusView struct {
 	ConfigurationID string        `json:"configuration_id,omitempty"`
 	Authentication  storageHealth `json:"authentication"`
 
-	Code              string           `json:"code"`
-	Version           int              `json:"schema_version"`
-	State             string           `json:"state"`
-	Storage           string           `json:"storage,omitempty"`
-	StorageVerifiedAt time.Time        `json:"storage_verified_at,omitempty"`
-	Privacy           string           `json:"privacy"`
-	Background        string           `json:"background"`
-	Paused            bool             `json:"paused"`
-	Projects          []string         `json:"projects"`
-	Apps              []appStatus      `json:"applications"`
-	Collector         collector.Status `json:"collector"`
-	Next              string           `json:"next_action"`
+	Code               string              `json:"code"`
+	Version            int                 `json:"schema_version"`
+	State              string              `json:"state"`
+	Storage            string              `json:"storage,omitempty"`
+	StorageVerifiedAt  time.Time           `json:"storage_verified_at,omitempty"`
+	Privacy            string              `json:"privacy"`
+	Background         string              `json:"background"`
+	Paused             bool                `json:"paused"`
+	Projects           []string            `json:"projects"`
+	Apps               []appStatus         `json:"applications"`
+	Collector          collector.Status    `json:"collector"`
+	CaptureDiagnostics []captureDiagnostic `json:"capture_diagnostics,omitempty"`
+	Next               string              `json:"next_action"`
 }
 
 func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
@@ -125,6 +126,10 @@ func readStatus(env Env) (view statusView, err error) {
 	view.Storage = fmt.Sprintf("%s / %s / %s", cfg.Storage.Provider, cfg.Storage.Bucket, cfg.Storage.Prefix)
 	view.StorageVerifiedAt = cfg.StorageVerifiedAt
 	view.ConfigurationID = configurationID(cfg)
+	view.CaptureDiagnostics, err = readCaptureDiagnostics(home)
+	if err != nil {
+		return view, err
+	}
 	view.Authentication.State = "unknown"
 	if err := local.Read(filepath.Join(home, "storage-health.json"), &view.Authentication); err != nil && !os.IsNotExist(err) {
 		return view, err

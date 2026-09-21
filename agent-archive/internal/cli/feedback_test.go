@@ -17,7 +17,7 @@ func TestFeedbackFileIsFilteredBeforeRequestPersistence(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	setUpTestConfig(t, home, project, now.Add(-time.Hour))
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": project}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": project}, now); err != nil {
 		t.Fatal(err)
 	}
 	store, _ := collector.NewLocalStore(home)
@@ -69,7 +69,7 @@ func TestFeedbackRejectsSessionExcludedByCurrentSetup(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	now := time.Now().UTC()
 	setUpTestConfig(t, home, project, now.Add(-time.Hour))
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": project}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": project}, now); err != nil {
 		t.Fatal(err)
 	}
 	store, err := collector.NewLocalStore(home)

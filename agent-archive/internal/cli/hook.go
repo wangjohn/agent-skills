@@ -134,14 +134,14 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 
 	switch kind {
 	case hookEventStart:
-		return handleSessionStart(store, cfg, harness, nativeSessionID, payload, now)
+		return handleSessionStart(home, store, cfg, harness, nativeSessionID, payload, now)
 	case hookEventStop, hookEventSubagentStop, hookEventResponse:
 		return handleSessionStop(store, harness, nativeSessionID, eventName, payload, now)
 	}
 	return nil
 }
 
-func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
+func handleSessionStart(home string, store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
 	transcriptPath, _ := payload["transcript_path"].(string)
 	root := projectRoot(payload)
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
@@ -182,32 +182,26 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		}
 	}
 
-	// This native session ID has never been registered locally. Claude Code
-	// and Codex both document a "source" field on SessionStart that
-	// distinguishes a fresh conversation from a continuation of an earlier
-	// one (Codex: https://learn.chatgpt.com/docs/hooks.md, "Common input
-	// fields" and the SessionStart section; values "startup", "resume",
-	// "clear", "compact"). "resume" and "compact" both continue a
-	// conversation whose true start time we cannot establish from this
-	// event, so for a never-seen session the spec's guidance on older
-	// resumed sessions applies: leave it uncollected rather than guess. A
-	// "compact" of a session we already registered never reaches here; the
-	// found branch above keeps its original start time. "startup" and
-	// "clear" both begin a new conversation and are treated as fresh.
-	// Cursor does not document an equivalent signal, so a first-seen start
-	// for it is treated as fresh; this is a known simplification pending
-	// live verification against that harness (tracked in
-	// docs/agent-archive-implementation.md).
-	if harnessReportsSessionSource(harness) {
-		if source, _ := payload["source"].(string); sessionSourceContinuesEarlierConversation(source) {
-			return nil
-		}
+	// A hook receipt time is not a native session start time. Require a
+	// documented fresh-start signal before creating a new registration.
+	// Codex and Claude Code expose source=startup|clear. Cursor documents
+	// sessionStart as creation of a new composer, but older/unversioned payloads
+	// were observed without enough provenance, so require its documented
+	// cursor_version field as part of that signal.
+	if !provesFreshSessionStart(harness, payload) {
+		return recordCaptureDiagnostic(home, captureDiagnostic{
+			Code: diagnosticUnknownSessionStart, Harness: canonicalHarness(harness),
+			ProjectRoot: root, ObservedAt: now,
+		})
 	}
 	if root == "" {
 		return fmt.Errorf("hook payload for SessionStart has no project root")
 	}
 	if !cfg.Archive.Eligible(root, now) {
-		return nil
+		return recordCaptureDiagnostic(home, captureDiagnostic{
+			Code: diagnosticPreActivationStart, Harness: canonicalHarness(harness),
+			ProjectRoot: root, ObservedAt: now,
+		})
 	}
 	archiveID, _, err := store.EnsureArchiveSessionID(nativeSessionID)
 	if err != nil {
@@ -231,6 +225,28 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 	return saveLifecycleEvidence(store, archiveID, harness, "sessionstart", payload, now)
 }
 
+func canonicalHarness(harness string) string {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	if harness == "claude-code" {
+		return "claude"
+	}
+	return harness
+}
+
+func provesFreshSessionStart(harness string, payload map[string]any) bool {
+	switch canonicalHarness(harness) {
+	case "codex", "claude":
+		source, _ := payload["source"].(string)
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "startup", "clear":
+			return true
+		}
+	case "cursor":
+		return firstNonEmptyString(payload, "cursor_version") != ""
+	}
+	return false
+}
+
 func applyHarnessObservation(target *archive.Harness, harness string, payload map[string]any) {
 	if target == nil {
 		return
@@ -251,29 +267,6 @@ func saveLifecycleEvidence(store *collector.LocalStore, archiveID, harness, reas
 		return err
 	}
 	return store.SaveRequest(archiveID, reason, now, *evidence)
-}
-
-// harnessReportsSessionSource reports whether the harness documents a
-// "source" field on its SessionStart payload. Claude Code and Codex do;
-// Cursor does not.
-func harnessReportsSessionSource(harness string) bool {
-	switch strings.ToLower(strings.TrimSpace(harness)) {
-	case "claude", "claude-code", "codex":
-		return true
-	}
-	return false
-}
-
-// sessionSourceContinuesEarlierConversation reports whether a documented
-// SessionStart "source" value means the event continues a conversation
-// that began earlier ("resume", "compact") rather than starting a new one
-// ("startup", "clear", or absent).
-func sessionSourceContinuesEarlierConversation(source string) bool {
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "resume", "compact":
-		return true
-	}
-	return false
 }
 
 func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {

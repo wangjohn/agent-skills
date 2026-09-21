@@ -141,7 +141,7 @@ func TestCollectorKeepsLastPublicationOnUnchangedPass(t *testing.T) {
 	now := time.Now()
 	setUpTestConfig(t, home, project, now.Add(-time.Hour))
 	env := testEnv(t, home, now)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runOnePass(env, false); err != nil {
@@ -264,7 +264,7 @@ func TestRetentionReductionShowsImpactBeforeConfirmation(t *testing.T) {
 	now := time.Now().UTC()
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), now)
 	setupRun(t, env, s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project), 0)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runOnePass(env, false); err != nil {
