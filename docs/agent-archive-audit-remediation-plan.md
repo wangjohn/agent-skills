@@ -1,6 +1,6 @@
 # Agent Archive audit remediation plan
 
-Prepared: 2026-09-21. Status: implementation PRs open; final combined verification in progress. See [the acceptance record](agent-archive-remediation-acceptance.md) for PRs, evidence, and explicit external blockers.
+Prepared: 2026-09-21. Status: all eight implementation PRs open; combined automated verification passed. Live acceptance and explicit capability blockers remain. See [the acceptance record](agent-archive-remediation-acceptance.md) for PRs, evidence, and explicit external blockers.
 
 ## Scope and baseline
 
