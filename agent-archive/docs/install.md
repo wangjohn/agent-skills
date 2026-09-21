@@ -48,7 +48,11 @@ Macs are supported.
    [Signing and notarization](#signing-and-notarization) below); until
    then, or for a build you made yourself, right-click the binary in
    Finder and choose **Open** once to approve it, or run
-   `xattr -d com.apple.quarantine /usr/local/bin/agent-archive`.
+   `xattr -d com.apple.quarantine` on the installed binary.
+
+   To upgrade later, remove or `mv` the old binary before putting the new
+   one in place. Overwriting it in place with `cp` can leave macOS refusing
+   to launch it (it is killed at startup) until the file is recreated.
 
 5. Run the guided setup:
 

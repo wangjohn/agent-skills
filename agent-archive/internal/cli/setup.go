@@ -152,7 +152,7 @@ func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env 
 
 	fmt.Fprintln(stdout, "\nWhich project directories should be captured?")
 	p.help("Absolute paths, one per line. Only sessions started in exactly these directories are archived.")
-	projects, err := promptProjects(p, existing.Archive.Projects, now)
+	projects, err := promptProjects(p, existing.Archive.Projects, now, userHome)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
 		return 1
@@ -302,8 +302,7 @@ func rollbackHooksAndLaunchAgent(env Env, stderr io.Writer, changes []hooks.Chan
 // answer when existing R2 credentials are already on file keeps them
 // rather than overwriting Keychain with an empty secret.
 func promptStorage(p *prompter, existing credentials.Config) (credentials.Config, credentials.R2Credentials, bool, error) {
-	fmt.Fprintln(p.out, "Where should sessions be stored?")
-	p.options("1) Cloudflare R2", "2) Amazon S3")
+	p.help("Where should sessions be stored?", "1) Cloudflare R2", "2) Amazon S3")
 	choice, err := p.withDefault("Choice", defaultProviderChoice(existing.Provider))
 	if err != nil {
 		return credentials.Config{}, credentials.R2Credentials{}, false, err
@@ -328,8 +327,10 @@ func promptStorage(p *prompter, existing credentials.Config) (credentials.Config
 		if cfg.R2Endpoint, err = p.withDefault("R2 endpoint", existing.R2Endpoint); err != nil {
 			return cfg, credentials.R2Credentials{}, false, err
 		}
-		if cfg.R2AccountID == "" && cfg.R2Endpoint == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("either the R2 account ID or the R2 endpoint is required")
+		// Validate both fields the same way the store will, before any
+		// secret is collected or written to Keychain.
+		if _, err := credentials.R2Endpoint(cfg.R2Endpoint, cfg.R2AccountID); err != nil {
+			return cfg, credentials.R2Credentials{}, false, err
 		}
 		p.help("Where in the bucket should sessions go? A folder-style prefix.")
 		if cfg.Prefix, err = p.withDefault("Prefix", firstNonEmpty(existing.Prefix, defaultPrefix)); err != nil {
@@ -450,22 +451,27 @@ func harnessDisplayNames(hs []string) []string {
 	return out
 }
 
-// normalizeProjectRoot expands a leading ~ and cleans the path so the stored
-// root matches the working directory a hook later reports. It rejects
-// relative paths: a root that depends on where setup was run would silently
-// never match anything.
-func normalizeProjectRoot(root string) (string, error) {
+// normalizeProjectRoot expands a leading ~ (against userHome, the same
+// directory setup uses for hook files) and resolves symlinks, so the stored
+// root matches the real working directory a hook later reports: Eligible
+// and ProjectID compare lexically and leave symlink resolution to their
+// caller. It rejects relative paths, which would depend on where setup was
+// run and silently never match anything. It reports whether the directory
+// exists yet so the caller can warn about a likely typo without refusing a
+// project that is about to be cloned.
+func normalizeProjectRoot(root, userHome string) (resolved string, exists bool, err error) {
 	if root == "~" || strings.HasPrefix(root, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("expand ~ in %q: %w", root, err)
-		}
-		root = filepath.Join(home, strings.TrimPrefix(root, "~"))
+		root = filepath.Join(userHome, strings.TrimPrefix(root, "~"))
 	}
 	if !filepath.IsAbs(root) {
-		return "", fmt.Errorf("project directory %q must be an absolute path", root)
+		return "", false, fmt.Errorf("project directory %q must be an absolute path", root)
 	}
-	return filepath.Clean(root), nil
+	resolved, err = local.ResolveExistingSymlinks(root)
+	if err != nil {
+		return "", false, fmt.Errorf("project directory %q: %w", root, err)
+	}
+	info, statErr := os.Stat(resolved)
+	return resolved, statErr == nil && info.IsDir(), nil
 }
 
 func containsString(values []string, target string) bool {
@@ -481,8 +487,9 @@ func containsString(values []string, target string) bool {
 // collects new project roots to add. Kept projects retain their original
 // ActivatedAt, satisfying the spec's "reruns preserve existing activation
 // times"; added ones activate now.
-func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time) ([]archive.ProjectActivation, error) {
+func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time, userHome string) ([]archive.ProjectActivation, error) {
 	var kept []archive.ProjectActivation
+	seen := map[string]bool{}
 	for _, project := range existing {
 		if !project.Included {
 			continue
@@ -493,16 +500,25 @@ func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.
 		}
 		if keep {
 			kept = append(kept, project)
+			seen[filepath.Clean(project.Root)] = true
 		}
 	}
 	added, err := p.lines("Add project directories (blank line to finish):")
 	if err != nil {
 		return nil, err
 	}
-	for _, root := range added {
-		root, err = normalizeProjectRoot(root)
+	for _, entered := range added {
+		root, exists, err := normalizeProjectRoot(entered, userHome)
 		if err != nil {
 			return nil, err
+		}
+		if seen[root] {
+			fmt.Fprintf(p.out, "  %s is already included; skipping.\n", root)
+			continue
+		}
+		seen[root] = true
+		if !exists {
+			fmt.Fprintf(p.out, "  Note: %s does not exist yet; sessions there are captured once it does.\n", root)
 		}
 		kept = append(kept, archive.ProjectActivation{
 			ProjectID: archive.ProjectID(root), Root: root, Included: true, ActivatedAt: now,

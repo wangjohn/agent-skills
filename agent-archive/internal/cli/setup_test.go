@@ -560,3 +560,118 @@ func TestSetupRejectsNonPositiveRetentionDays(t *testing.T) {
 		t.Fatal("rejecting retention days must not leave a config behind")
 	}
 }
+
+// setupRun drives runSetupCommand with scripted answers and returns the exit
+// code and both output streams.
+func setupRun(t *testing.T, env Env, answers ...string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := runSetupCommand(nil, strings.NewReader(strings.Join(answers, "\n")+"\n"), &stdout, &stderr, env)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestSetupRejectsBlankOrInvalidStorageFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		answers []string
+		want    string
+	}{
+		{"s3 blank bucket", []string{"2", ""}, "bucket name is required"},
+		{"s3 blank region", []string{"2", "b", ""}, "AWS region is required"},
+		{"s3 blank profile", []string{"2", "b", "us-east-1", ""}, "AWS profile is required"},
+		{"r2 blank bucket", []string{"1", ""}, "bucket name is required"},
+		{"r2 no account id or endpoint", []string{"1", "b", "", ""}, "R2 endpoint or account ID is required"},
+		{"r2 malformed endpoint", []string{"1", "b", "", "http://acct.r2.cloudflarestorage.com/x"}, "invalid R2 endpoint"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupTestEnv(t, t.TempDir(), t.TempDir(), newFakeKeychain(), time.Now())
+			code, _, stderr := setupRun(t, env, tc.answers...)
+			if code == 0 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("code=%d stderr=%q want %q", code, stderr, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetupRejectsRelativeProjectRoot(t *testing.T) {
+	env := setupTestEnv(t, t.TempDir(), t.TempDir(), newFakeKeychain(), time.Now())
+	code, _, stderr := setupRun(t, env,
+		"2", "b", "us-east-1", "prof", "",
+		"y", "n", "n",
+		"proj", "",
+	)
+	if code == 0 || !strings.Contains(stderr, `project directory "proj" must be an absolute path`) {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+}
+
+func TestSetupExpandsTildeAndResolvesProjectSymlinks(t *testing.T) {
+	home, userHome := t.TempDir(), t.TempDir()
+	real := filepath.Join(userHome, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(userHome, "link")); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now())
+	code, stdout, stderr := setupRun(t, env,
+		"2", "b", "us-east-1", "prof", "",
+		"n", "y", "n",
+		"~/link", "",
+		"y", "",
+		"y",
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	cfg, _, err := config.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Archive.Projects) != 1 || cfg.Archive.Projects[0].Root != want {
+		t.Fatalf("projects=%#v want root %q", cfg.Archive.Projects, want)
+	}
+	if !strings.Contains(stdout, "Include Claude Code?") || strings.Contains(stdout, "Include claude?") {
+		t.Fatalf("expected display names in prompts: %s", stdout)
+	}
+	if strings.Contains(stdout, "does not exist yet") {
+		t.Fatalf("existing directory must not be flagged as missing: %s", stdout)
+	}
+}
+
+func TestSetupDeduplicatesProjectRootsAndNotesMissingDirectories(t *testing.T) {
+	home := t.TempDir()
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
+	code, stdout, stderr := setupRun(t, env,
+		"2", "b", "us-east-1", "prof", "",
+		"y", "n", "n",
+		"/work/widget", "/work/widget/", "/work/./widget", "",
+		"y", "",
+		"y",
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	cfg, _, err := config.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Archive.Projects) != 1 || cfg.Archive.Projects[0].Root != "/work/widget" {
+		t.Fatalf("projects=%#v", cfg.Archive.Projects)
+	}
+	if strings.Count(stdout, "is already included; skipping.") != 2 {
+		t.Fatalf("expected two duplicate notices: %s", stdout)
+	}
+	if !strings.Contains(stdout, "/work/widget does not exist yet") {
+		t.Fatalf("expected a missing-directory note: %s", stdout)
+	}
+	if !strings.Contains(stdout, "Projects:      1 included") {
+		t.Fatalf("summary must count one project: %s", stdout)
+	}
+}

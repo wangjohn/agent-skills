@@ -40,20 +40,14 @@ func (p *prompter) line(label string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// help prints guidance for the prompt that follows: the first line flush
-// with the prompts, any continuation lines indented beneath it.
-func (p *prompter) help(lines ...string) {
-	for i, l := range lines {
-		if i > 0 {
-			l = "  " + l
-		}
-		fmt.Fprintln(p.out, l)
+// help prints guidance for the prompt that follows: the question flush with
+// the prompts, then any continuation lines (a note, or a menu of choices)
+// indented beneath it.
+func (p *prompter) help(question string, continuation ...string) {
+	if question != "" {
+		fmt.Fprintln(p.out, question)
 	}
-}
-
-// options prints an indented list of choices under a question.
-func (p *prompter) options(lines ...string) {
-	for _, l := range lines {
+	for _, l := range continuation {
 		fmt.Fprintln(p.out, "  "+l)
 	}
 }
