@@ -108,7 +108,7 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if quietOnBusy {
 		var prior storageHealth
 		healthErr := local.Read(filepath.Join(home, "storage-health.json"), &prior)
-		if healthErr != nil || prior.ConfigurationID != configurationID(cfg) || prior.Context != "background_collector" || prior.State != "verified" {
+		if healthErr != nil || prior.ConfigurationID != configurationID(cfg) || prior.Context != "background_collector" || prior.State != "verified" || env.now().Sub(prior.CheckedAt) > 5*time.Minute {
 			probeErr := storage.VerifyAccess(context.Background(), objectStore, "")
 			state := "verified"
 			if probeErr != nil {
