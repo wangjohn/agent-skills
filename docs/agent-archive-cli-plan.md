@@ -44,22 +44,16 @@ Do not add a separate doctor or repair command initially. `status` diagnoses; `s
 
 ### Three-step setup
 
-1. **Choose capture.** Offer detected supported applications together using friendly names, for example “Include Codex and Claude Code?” On decline, let the user choose each app; when none are detected, go directly to those choices. Offer to keep the existing selection on reconfiguration. Detection does not establish compatibility or verified capture. Require explicit app/project inclusion. Suggest the current directory only if it resolves to an appropriate project; otherwise ask for paths. Normalize and deduplicate project roots, reject missing/non-directory paths, and preserve activation times for existing roots. Display the policies “New sessions only” and “Include sessions without skills.” Keep the latter editable under advanced settings, preserving existing choices.
-2. **Connect storage.** Select R2 or S3. R2 asks for bucket, one account-ID-or-endpoint field, access key, and a hidden secret; S3 asks for bucket, region, and an existing profile. Reuse existing credentials by explicit choice. Default the prefix to `agent-archive/`; expose prefix and other optional settings through an advanced-settings choice. Validate fields immediately and retry only the invalid field. Run the existing synthetic write/read/list/delete probe automatically, showing stages and concise errors. Distinguish access verified from bucket privacy unknown.
-3. **Review and enable.** Show application names, exact project paths, destination, capture policy, and retention (90 days initially, editable). Explain best-effort filtering and retention deletion in the review. Require confirmation before activating capture. Install and start integrations, then show app-specific trust instructions and verification state. Finish the wizard without waiting for the user to switch apps and create sessions.
+1. **Choose apps and projects.** Offer detected applications together: “Include Codex and Claude Code?” Declining opens individual choices; no detections opens those choices directly. Show the current Git project's full path and ask “Archive sessions in this project?” Declining allows manual paths. Normalize symlinks and deduplicate roots, reject missing/non-directory paths, and preserve existing activation times.
+2. **Connect storage.** Explain up front that an existing private bucket is required; provider instructions are available through `help`. R2 asks for bucket, account ID or endpoint, access key, and hidden secret. S3 asks for bucket and an existing AWS profile, offering discovered profiles and using the selected profile's region when available. Ask for missing regions only. Use `agent-archive/` as the default folder. Run the synthetic access probe and display a concise result.
+3. **Review and start.** Show friendly application names, exact paths, destination, session scope, and automatic deletion after 90 days by default. Explain best-effort filtering and unknown bucket privacy. Ask “Start archiving? [Y/n/edit]”. Edit exposes apps, projects, sessions, retention, storage, folder, and AWS region. Recheck changed storage before applying; do not repeat the probe for other edits. Require confirmation before activating capture.
 
-Example completion, where the evidence supports each line:
+Example completion:
 
 ```text
-Setup saved.
-
-Storage       Access verified; privacy not verified
-Background    Started
-Codex         Waiting for first session
-Projects      /Users/example/work/project
-
-Next: complete the application's hook approval, then start a new
-session in this project. Run agent-archive status to check capture.
+Configuration saved.
+Next: in Codex CLI, open /hooks and approve the Agent Archive hooks, then start a new session in an included project.
+Check progress with agent-archive status.
 ```
 
 Do not claim a trust rejection unless the application exposes evidence of it. “No hook activity yet” is more accurate than guessing the cause.
@@ -122,7 +116,7 @@ Each slice builds on the previous contracts and is reviewable independently. Avo
 ## Verification and acceptance
 
 - Table-driven CLI tests cover every command's help, aliases, unknown flags, extra arguments, and exit code. Inject dependencies that fail if help attempts any I/O or mutation.
-- Scenario tests cover fresh R2/S3 setup, existing setup edits, resumed drafts, invalid values, EOF/cancel, hidden input, path normalization, no-app/no-project selection, and skipped advanced options.
+- Scenario tests cover fresh R2/S3 setup, existing setup edits, resumed drafts, invalid values, EOF/cancel, hidden input, path normalization, no-app/no-project selection, and final-review edits.
 - Failure injection covers Keychain denial, storage probe failure/cleanup failure, config write failure, hook failure, scheduler load failure, interrupted apply, and rollback failure. Assert old installations remain usable, paused state and activation times survive, and secrets never appear in output/drafts.
 - Reconfiguration tests cover removed apps/projects, duplicate paths, credential rotation, pending destination changes, previously published session ownership, and retention-reduction confirmation.
 - Status tests cover never configured, draft only, installation incomplete, unknown/stale job state, first-session waiting, local-only capture, publication/read-back, expired auth, paused, and partial app coverage. Never infer verification from configuration alone.

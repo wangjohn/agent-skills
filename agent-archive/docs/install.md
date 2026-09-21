@@ -27,6 +27,15 @@ Macs are supported.
    sudo mv agent-archive-darwin-* /usr/local/bin/agent-archive
    ```
 
+   On an Apple Silicon Mac with Homebrew, `/usr/local/bin` may not exist
+   at all. Either create it first (`sudo mkdir -p /usr/local/bin`) or use
+   Homebrew's directory, which is already on your `PATH` and needs no
+   `sudo`:
+
+   ```sh
+   mv agent-archive-darwin-* /opt/homebrew/bin/agent-archive
+   ```
+
 4. Confirm it runs and check the version:
 
    ```sh
@@ -39,7 +48,11 @@ Macs are supported.
    [Signing and notarization](#signing-and-notarization) below); until
    then, or for a build you made yourself, right-click the binary in
    Finder and choose **Open** once to approve it, or run
-   `xattr -d com.apple.quarantine /usr/local/bin/agent-archive`.
+   `xattr -d com.apple.quarantine` on the installed binary.
+
+   To upgrade later, remove or `mv` the old binary before putting the new
+   one in place. Overwriting it in place with `cp` can leave macOS refusing
+   to launch it (it is killed at startup) until the file is recreated.
 
 5. Run the guided setup:
 
@@ -48,7 +61,8 @@ Macs are supported.
    ```
 
    Setup has three steps: choose apps and projects, connect storage, then
-   review and enable. Include each project explicitly. Only new sessions
+   review and start. You need an existing private R2 or S3 bucket. Type `help`
+   at the storage prompt for provider instructions. Include each project explicitly. Only new sessions
    are captured; historical conversations are not imported.
 
    Setup offers the apps it finds together: “Include Codex and Claude Code?”
@@ -56,14 +70,22 @@ Macs are supported.
    found, it opens the individual choices immediately. On reconfiguration,
    it offers to keep your existing selection.
 
-   Session settings are shown in plain language: “All new sessions, with or
-   without skills” and “Keep for: 90 days.” Choose “Change these settings?”
-   only if you want to adjust them.
+   If setup finds the current Git project, it shows its full path and asks
+   “Archive sessions in this project?” Accept to continue, or decline to
+   enter project paths yourself.
 
    For R2, enter a bucket, account ID or S3 endpoint, and credentials. Secret
-   input is hidden on a terminal and stored in Keychain. For S3, choose a
-   bucket, region, and existing AWS profile. Optional prefix and capture
-   settings stay behind short advanced-settings prompts.
+   input is hidden on a terminal and stored in Keychain. For S3, enter the
+   bucket and choose an existing AWS profile. Setup offers profiles from your
+   AWS settings and uses the selected profile's region when available. It
+   asks for a region only when one is missing.
+
+   The final summary shows the apps, projects, destination, session scope,
+   and automatic deletion period. At “Start archiving? [Y/n/edit]”, choose
+   `edit` to adjust apps, projects, session scope, retention, storage, the
+   folder inside the bucket, or the AWS region. Ordinary setup has no
+   advanced-settings questions. Storage changes are checked again before
+   starting; editing other choices does not repeat the connection test.
 
    Review the exact project paths and retention period before enabling.
    The default is 90 days; older sessions are deleted automatically.
@@ -191,6 +213,7 @@ settings, and credentials so `agent-archive setup` can reinstall it. Unrelated
 hook handlers, remote archives, and the CLI executable are always kept.
 
 To also delete owned local files and stored R2 credentials:
+
 
 ```sh
 agent-archive uninstall --delete-local-data

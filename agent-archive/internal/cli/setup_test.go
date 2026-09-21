@@ -56,6 +56,7 @@ func (f *fakeKeychain) Delete(_ context.Context, reference string) error {
 func setupTestEnv(t *testing.T, home, userHome string, keychain *fakeKeychain, now time.Time) Env {
 	t.Helper()
 	env := testEnv(t, home, now)
+	env.AWSProfiles = func() ([]AWSProfile, error) { return nil, nil }
 	env.WorkingDir = func() (string, error) { return "", errors.New("no current project") }
 	env.UserHomeDir = func() (string, error) { return userHome, nil }
 	env.Executable = func() (string, error) { return "/opt/agent-archive/bin/agent-archive", nil }
@@ -75,10 +76,10 @@ func s3SetupInput(bucket, region, profile string, codex, claude, cursor bool, pr
 		}
 		return "n"
 	}
-	return strings.Join([]string{yn(codex), yn(claude), yn(cursor), project, "", "n", "s3", bucket, region, profile, "n", "y"}, "\n") + "\n"
+	return strings.Join([]string{yn(codex), yn(claude), yn(cursor), project, "", "s3", bucket, profile, region, "y"}, "\n") + "\n"
 }
 func r2SetupInput(project, secret string) string {
-	return strings.Join([]string{"y", "n", "n", project, "", "n", "r2", "test-bucket", "0123456789abcdef0123456789abcdef", "ACCESS", secret, "n", "y"}, "\n") + "\n"
+	return strings.Join([]string{"y", "n", "n", project, "", "r2", "test-bucket", "0123456789abcdef0123456789abcdef", "ACCESS", secret, "y"}, "\n") + "\n"
 }
 func setupRun(t *testing.T, env Env, input string, want int) string {
 	t.Helper()
@@ -157,7 +158,7 @@ func TestSetupStorageFailureKeepsDraftAndOldSecret(t *testing.T) {
 	setupRun(t, env, r2SetupInput(project, "old-private-value"), 0)
 	old, _, _ := config.Load(home)
 	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return nil, errors.New("offline") }
-	input := "storage\nr2\ntest-bucket\n0123456789abcdef0123456789abcdef\nn\nACCESS2\nnew-private-value\nn\ny\n"
+	input := "storage\nr2\ntest-bucket\n0123456789abcdef0123456789abcdef\nn\nACCESS2\nnew-private-value\ny\n"
 	output := setupRun(t, env, input, 1)
 	secret, err := kc.Load(context.Background(), old.Storage.R2CredentialRef)
 	if err != nil || secret.SecretAccessKey != "old-private-value" {
@@ -185,7 +186,7 @@ func TestSetupReconfigurePreservesPauseIdentityActivationAndRemovesHooks(t *test
 	old.Paused = true
 	config.Save(home, old)
 	env.Now = func() time.Time { return time.Now().Add(time.Hour) }
-	setupRun(t, env, "capture\nn\ny\nn\nn\ny\n\nn\ny\n", 0)
+	setupRun(t, env, "capture\nn\ny\nn\nn\ny\n\ny\n", 0)
 	next, _, _ := config.Load(home)
 	if !next.Paused || next.MachineID != old.MachineID || !next.Archive.Projects[0].ActivatedAt.Equal(old.Archive.Projects[0].ActivatedAt) {
 		t.Fatal("reconfigure reset stable state")
@@ -261,7 +262,7 @@ func TestSetupDestinationRejectsPendingAndRetiresPublishedSessions(t *testing.T)
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}
-	input := "storage\ns3\nother-bucket\nus-east-1\nprofile\nn\ny\n"
+	input := "storage\ns3\nother-bucket\nprofile\ny\n"
 	output := setupRun(t, env, input, 1)
 	if !strings.Contains(output, "pending") {
 		t.Fatal(output)

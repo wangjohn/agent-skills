@@ -45,14 +45,14 @@ func TestDetectedAppsSetupSkipsIndividualQuestions(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
 	env.DetectHarnesses = func(string) []string { return []string{"codex", "claude"} }
-	input := strings.Join([]string{"y", project, "", "n", "s3", "test-bucket", "us-east-1", "profile", "n", "y"}, "\n") + "\n"
+	input := strings.Join([]string{"y", project, "", "s3", "test-bucket", "profile", "us-east-1", "y"}, "\n") + "\n"
 	output := setupRun(t, env, input, 0)
 	for _, unwanted := range []string{"Detected settings", "capture policy", "Include Cursor?", "Include Codex?"} {
 		if strings.Contains(output, unwanted) {
 			t.Fatalf("unexpected %q in %s", unwanted, output)
 		}
 	}
-	for _, want := range []string{"Include Codex and Claude Code?", "Sessions: All new sessions, with or without skills", "Keep for: 90 days", "Change these settings?"} {
+	for _, want := range []string{"Include Codex and Claude Code?", "Save new sessions, with or without skills.", "Automatically delete archived sessions after 90 days.", "Start archiving? [Y/n/edit]"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("missing %q in %s", want, output)
 		}

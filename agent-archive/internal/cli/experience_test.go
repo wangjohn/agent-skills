@@ -239,7 +239,7 @@ func TestDraftStorageEditKeepsCaptureChoices(t *testing.T) {
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
 	input := s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project)
 	setupRun(t, env, strings.TrimSuffix(input, "y\n")+"n\n", 0)
-	setupRun(t, env, "storage\ns3\nother-bucket\nus-east-1\nprofile\nn\ny\n", 0)
+	setupRun(t, env, "storage\ns3\nother-bucket\nprofile\ny\n", 0)
 	cfg, _, _ := config.Load(home)
 	if cfg.Storage.Bucket != "other-bucket" || len(cfg.Archive.Projects) != 1 || len(cfg.Harnesses) != 1 {
 		t.Fatal("edit lost capture choices")

@@ -105,3 +105,12 @@ Local verification for this refinement:
   archive data directory.
 - A pseudo-terminal test verified secret input disables terminal echo and
   restores it afterward. It used a synthetic secret and no Keychain/cloud access.
+
+The final onboarding pass offers the current Git project with explicit consent,
+reads existing AWS profile names and regions without resolving credentials, and
+moves optional choices into the final review's Edit menu. Non-storage edits reuse
+the successful access check; changed storage is checked again. Regression tests
+cover the short path, manual project fallback, profile switching, provider help,
+review edits, cancellation/EOF, and home/symlink normalization. The full Go race
+suite, Go vet, skill validation, and 15 legacy Python tests passed; the final CLI
+regressions and both unsigned macOS builds were also verified.

@@ -30,7 +30,8 @@ var Version = "dev"
 // substitute a temporary home directory, a fixed clock, and an in-memory
 // object store. A nil field defaults to the real thing.
 type Env struct {
-	WorkingDir func() (string, error)
+	AWSProfiles func() ([]AWSProfile, error)
+	WorkingDir  func() (string, error)
 	// JobState reports loaded, running, missing, or unknown without changing launchd.
 	JobState func(string) string
 	Home     func() (string, error)

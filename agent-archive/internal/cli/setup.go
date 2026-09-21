@@ -67,6 +67,9 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 		return err
 	}
 	p := newPrompter(stdin, out)
+	if !found {
+		fmt.Fprintln(out, "You’ll need a private Cloudflare R2 or Amazon S3 bucket. Type help at the storage prompt for instructions.")
+	}
 	draft := setupDraft{Version: 1, Config: existing}
 	draftPath := filepath.Join(home, "setup-draft.json")
 	var saved setupDraft
@@ -134,133 +137,144 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 		}
 	}
 	save := func() error { return local.Write(draftPath, draft) }
-	if draft.Step == 0 {
-		if err = chooseCapture(p, &draft.Config, userHome, env); err != nil {
-			return err
-		}
-		draft.Step = 1
-		if err = save(); err != nil {
-			return err
-		}
-	}
-	if draft.Step == 1 {
-		fmt.Fprintln(out, "\n2 of 3 — Connect storage")
-		cfg, secret, saveSecret, e := promptStorage(p, draft.Config.Storage)
-		if e != nil {
-			return e
-		}
-		if saveSecret {
-			keychain, e := env.keychain()
-			if e != nil {
-				return fmt.Errorf("open Keychain: %w", e)
+	var verifiedStorage credentials.Config
+	for {
+		if draft.Step == 0 {
+			if err = chooseCapture(p, &draft.Config, userHome, env); err != nil {
+				return err
 			}
-			id, e := local.ID()
-			if e != nil {
-				return e
-			}
-			cfg.R2CredentialRef = "setup-" + id
-			draft.CredentialRef = cfg.R2CredentialRef
-			draft.StagedRefs = append(draft.StagedRefs, cfg.R2CredentialRef)
-			// Journal the opaque reference before storing, so cancellation/crash is recoverable.
-			draft.Config.Storage = cfg
-			if e = save(); e != nil {
-				return e
-			}
-			if e = keychain.Save(context.Background(), cfg.R2CredentialRef, secret); e != nil {
-				return fmt.Errorf("save staged credential: %w", e)
-			}
-
-		}
-		draft.Config.Storage = cfg
-		draft.Step = 2
-		if err = save(); err != nil {
-			return err
-		}
-	}
-	if err = save(); err != nil {
-		return err
-	}
-	if draft.Config.Storage.Provider == credentials.ProviderR2 {
-		kc, e := env.keychain()
-		if e != nil {
-			return e
-		}
-		if _, e = kc.Load(context.Background(), draft.Config.Storage.R2CredentialRef); e != nil {
 			draft.Step = 1
-			draft.Config.Storage.R2CredentialRef = ""
-			_ = save()
-			return fmt.Errorf("stored R2 credential is unavailable; enter it again during setup")
+			if err = save(); err != nil {
+				return err
+			}
 		}
-	}
-	fmt.Fprintln(out, "\nChecking storage with a temporary test object (write, read, list, delete)…")
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	store, err := env.openStore(draft.Config)
-	if err != nil {
-		draft.Step = 1
-		_ = save()
-		return fmt.Errorf("connect storage: %w", err)
-	}
-	if err = storage.VerifyAccess(ctx, store, draft.Config.Storage.Prefix); err != nil {
-		return fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", err)
-	}
-	draft.Config.StorageVerifiedAt = env.now().UTC()
-	fmt.Fprintln(out, "Storage access verified. Bucket privacy is not verified.")
-	if draft.Config.Storage.Provider == credentials.ProviderR2 {
-		fmt.Fprintln(out, "Check public access: https://developers.cloudflare.com/r2/buckets/public-buckets/")
-	} else {
-		fmt.Fprintln(out, "Check public access: https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html")
-	}
+		if draft.Step == 1 {
+			fmt.Fprintln(out, "\n2 of 3 — Connect storage")
+			cfg, secret, saveSecret, e := promptStorage(p, draft.Config.Storage, env)
+			if e != nil {
+				return e
+			}
+			if saveSecret {
+				keychain, e := env.keychain()
+				if e != nil {
+					return fmt.Errorf("open Keychain: %w", e)
+				}
+				id, e := local.ID()
+				if e != nil {
+					return e
+				}
+				cfg.R2CredentialRef = "setup-" + id
+				draft.CredentialRef = cfg.R2CredentialRef
+				draft.StagedRefs = append(draft.StagedRefs, cfg.R2CredentialRef)
+				// Journal the opaque reference before storing, so cancellation/crash is recoverable.
+				draft.Config.Storage = cfg
+				if e = save(); e != nil {
+					return e
+				}
+				if e = keychain.Save(context.Background(), cfg.R2CredentialRef, secret); e != nil {
+					return fmt.Errorf("save staged credential: %w", e)
+				}
 
-	if draft.Config.RetentionDays <= 0 {
-		draft.Config.RetentionDays = defaultRetentionDays
-	}
-	fmt.Fprintln(out, "\n3 of 3 — Review and enable")
-	fmt.Fprintf(out, "Storage:      %s / %s / %s\nApplications: %s\n", draft.Config.Storage.Provider, draft.Config.Storage.Bucket, draft.Config.Storage.Prefix, friendlyApps(draft.Config.Harnesses))
-	for _, project := range draft.Config.Archive.Projects {
-		if project.Included {
-			fmt.Fprintf(out, "Project:      %s\n", project.Root)
+			}
+			draft.Config.Storage = cfg
+			draft.Step = 2
+			if err = save(); err != nil {
+				return err
+			}
 		}
-	}
-	fmt.Fprintln(out, "History:      New sessions only")
-	fmt.Fprintf(out, "Without skills: %t\nRetention:    %d days; older sessions are deleted automatically\n", !draft.Config.RequireSkillUse, draft.Config.RetentionDays)
-	fmt.Fprintln(out, "Filtering is best effort. Private code and sensitive text may remain in the archive.")
-	if existing.Paused {
-		fmt.Fprintln(out, "Capture remains paused until you run agent-archive resume.")
-	}
-	if err = reviewChanges(home, existing, draft.Config, p, env); err != nil {
-		return err
-	}
-	enabled, err := p.yesNo("Apply these settings?", true)
-	if err != nil {
-		return err
-	}
-	if !enabled {
-		fmt.Fprintln(out, "Cancelled. Active settings are unchanged; your setup draft is saved.")
+		if err = save(); err != nil {
+			return err
+		}
+		if draft.Config.Storage.Provider == credentials.ProviderR2 {
+			kc, e := env.keychain()
+			if e != nil {
+				return e
+			}
+			if _, e = kc.Load(context.Background(), draft.Config.Storage.R2CredentialRef); e != nil {
+				draft.Step = 1
+				draft.Config.Storage.R2CredentialRef = ""
+				_ = save()
+				return fmt.Errorf("stored R2 credential is unavailable; enter it again during setup")
+			}
+		}
+		if draft.Config.Storage != verifiedStorage {
+			fmt.Fprintln(out, "\nChecking your storage connection…")
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			store, e := env.openStore(draft.Config)
+			if e != nil {
+				cancel()
+				draft.Step = 1
+				_ = save()
+				return fmt.Errorf("connect storage: %w", e)
+			}
+			e = storage.VerifyAccess(ctx, store, draft.Config.Storage.Prefix)
+			cancel()
+			if e != nil {
+				return fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", e)
+			}
+			draft.Config.StorageVerifiedAt = env.now().UTC()
+			verifiedStorage = draft.Config.Storage
+			fmt.Fprintln(out, "Connected.")
+		}
+
+		if draft.Config.RetentionDays <= 0 {
+			draft.Config.RetentionDays = defaultRetentionDays
+		}
+		showSetupReview(p, draft.Config, found)
+		if existing.Paused {
+			fmt.Fprintln(out, "Capture stays paused until you run agent-archive resume.")
+		}
+		if err = reviewChanges(home, existing, draft.Config, p, env); err != nil {
+			return err
+		}
+		label := "Start archiving?"
+		if found {
+			label = "Save these changes?"
+		}
+		action, e := reviewAction(p, label)
+		if e != nil {
+			return e
+		}
+		if action == "cancel" {
+			fmt.Fprintln(out, "Cancelled. Active settings are unchanged; your setup draft is saved.")
+			return nil
+		}
+		if action == "edit" {
+			if err = editSetupReview(p, &draft, userHome); err != nil {
+				return err
+			}
+			if err = save(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		for _, ref := range draft.StagedRefs {
+			if ref != draft.Config.Storage.R2CredentialRef && !containsString(draft.Config.RetiredCredentialRefs, ref) {
+				draft.Config.RetiredCredentialRefs = append(draft.Config.RetiredCredentialRefs, ref)
+			}
+		}
+		// Re-read under the machine lock in applySetup; it rejects concurrent config changes.
+		if err = applySetup(home, userHome, exe, existing, &draft.Config, env); err != nil {
+			return err
+		}
+		if err = os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		fmt.Fprintln(out, "\nConfiguration saved.")
+		if existing.Paused {
+			fmt.Fprintln(out, "Next: run agent-archive resume when you’re ready to start archiving.")
+		} else if containsString(draft.Config.Harnesses, "codex") {
+			fmt.Fprintln(out, "Next: in Codex CLI, open /hooks to approve the archive hooks, then start a new session in an included project.")
+			if len(draft.Config.Harnesses) > 1 {
+				fmt.Fprintln(out, "Repeat hook approval and a new session in your other selected apps.")
+			}
+		} else {
+			fmt.Fprintln(out, "Next: approve the archive hooks in your selected apps, then start a new session in an included project.")
+		}
+		fmt.Fprintln(out, "Check progress with agent-archive status.")
 		return nil
 	}
-	for _, ref := range draft.StagedRefs {
-		if ref != draft.Config.Storage.R2CredentialRef && !containsString(draft.Config.RetiredCredentialRefs, ref) {
-			draft.Config.RetiredCredentialRefs = append(draft.Config.RetiredCredentialRefs, ref)
-		}
-	}
-	// Re-read under the machine lock in applySetup; it rejects concurrent config changes.
-	if err = applySetup(home, userHome, exe, existing, &draft.Config, env); err != nil {
-		return err
-	}
-	if err = os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	fmt.Fprintln(out, "\nSetup complete. Settings saved; background collector installed.")
-	for _, app := range draft.Config.Harnesses {
-		fmt.Fprintf(out, "%s: waiting for a new session.\n", appName(app))
-	}
-	fmt.Fprintln(out, "Next: approve the archive hooks in each app, then start a harmless new session in an included project.")
-	if containsString(draft.Config.Harnesses, "codex") {
-		fmt.Fprintln(out, "Codex CLI: open /hooks to review and trust the installed hooks.")
-	}
-	fmt.Fprintln(out, "Run agent-archive status to check capture. Storage access alone does not verify capture.")
-	return nil
 }
 
 func chooseCapture(p *prompter, cfg *config.Config, userHome string, env Env) error {
@@ -274,6 +288,7 @@ func chooseCapture(p *prompter, cfg *config.Config, userHome string, env Env) er
 	if len(cfg.Harnesses) == 0 {
 		return fmt.Errorf("choose at least one application")
 	}
+	acceptedProject := false
 	if len(cfg.Archive.Projects) == 0 {
 		dir, e := os.Getwd()
 		if env.WorkingDir != nil {
@@ -281,45 +296,45 @@ func chooseCapture(p *prompter, cfg *config.Config, userHome string, env Env) er
 		}
 		if e == nil {
 			if root := suggestedProject(dir); root != "" {
-				fmt.Fprintf(p.out, "Current project: %s (enter this path below to include it).\n", root)
+				fmt.Fprintf(p.out, "Project: %s\n", root)
+				acceptedProject, err = p.yesNo("Archive sessions in this project?", true)
+				if err != nil {
+					return err
+				}
+				if acceptedProject {
+					cfg.Archive.Projects = []archive.ProjectActivation{{ProjectID: archive.ProjectID(root), Root: root, Included: true}}
+				}
 			}
 		}
 	}
-	cfg.Archive.Projects, err = promptProjects(p, cfg.Archive.Projects, time.Time{})
-	if err != nil {
-		return err
+	if !acceptedProject {
+		cfg.Archive.Projects, err = promptProjects(p, cfg.Archive.Projects, time.Time{}, userHome)
+		if err != nil {
+			return err
+		}
 	}
+
 	if len(cfg.Archive.Projects) == 0 {
 		return fmt.Errorf("choose at least one project")
 	}
 	if cfg.RetentionDays <= 0 {
 		cfg.RetentionDays = defaultRetentionDays
 	}
-	if cfg.RequireSkillUse {
-		fmt.Fprintln(p.out, "Sessions: New sessions with detected skill use")
-	} else {
-		fmt.Fprintln(p.out, "Sessions: All new sessions, with or without skills")
-	}
-	fmt.Fprintf(p.out, "Keep for: %d days\n", cfg.RetentionDays)
-	advanced, err := p.yesNo("Change these settings?", false)
-	if err != nil {
-		return err
-	}
-	if advanced {
-		all, e := p.yesNo("Save sessions even when no skills are used?", !cfg.RequireSkillUse)
-		if e != nil {
-			return e
-		}
-		cfg.RequireSkillUse = !all
-		cfg.RetentionDays, err = p.intWithDefault("Keep sessions for how many days?", cfg.RetentionDays)
-	}
-	return err
+	return nil
 }
 
-func promptStorage(p *prompter, existing credentials.Config) (credentials.Config, credentials.R2Credentials, bool, error) {
+func promptStorage(p *prompter, existing credentials.Config, env Env) (credentials.Config, credentials.R2Credentials, bool, error) {
 	cfg := existing
 	var secret credentials.R2Credentials
-	choice, err := promptChoice(p, "Storage provider: r2 (Cloudflare) or s3 (Amazon)", firstNonEmpty(existing.Provider, "r2"), "r2", "s3")
+	choice, err := promptChoice(p, "Storage provider: r2 (Cloudflare) or s3 (Amazon); help for instructions", firstNonEmpty(existing.Provider, "r2"), "r2", "s3", "help")
+	for err == nil && choice == "help" {
+		fmt.Fprintln(p.out, "Cloudflare R2: create a private bucket and bucket-scoped Object Read & Write credentials. Keep public access disabled.")
+		fmt.Fprintln(p.out, "https://developers.cloudflare.com/r2/get-started/s3/")
+		fmt.Fprintln(p.out, "Amazon S3: create a private bucket and configure an AWS profile with access to it.")
+		fmt.Fprintln(p.out, "https://docs.aws.amazon.com/AmazonS3/latest/userguide/create-bucket-overview.html")
+		fmt.Fprintln(p.out, "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html")
+		choice, err = promptChoice(p, "Storage provider", firstNonEmpty(existing.Provider, "r2"), "r2", "s3", "help")
+	}
 	if err != nil {
 		return cfg, secret, false, err
 	}
@@ -370,23 +385,12 @@ func promptStorage(p *prompter, existing credentials.Config) (credentials.Config
 			}
 		}
 	} else {
-		cfg.Region, err = p.required("AWS region", cfg.Region)
-		if err != nil {
-			return cfg, secret, false, err
-		}
-		cfg.AWSProfile, err = p.required("Existing AWS profile", cfg.AWSProfile)
-		if err != nil {
+		if err = promptAWSProfile(p, &cfg, env); err != nil {
 			return cfg, secret, false, err
 		}
 	}
 	cfg.Prefix = firstNonEmpty(cfg.Prefix, defaultPrefix)
-	advanced, err := p.yesNo("Change the storage prefix ("+cfg.Prefix+")?", false)
-	if err != nil {
-		return cfg, secret, false, err
-	}
-	if advanced {
-		cfg.Prefix, err = p.required("Storage prefix", cfg.Prefix)
-	}
+
 	return cfg, secret, secret.SecretAccessKey != "", err
 }
 
@@ -458,7 +462,7 @@ func promptHarnesses(p *prompter, detected, existing []string) ([]string, error)
 		fmt.Fprintln(p.out, "Choose at least one app to continue.")
 	}
 }
-func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time) ([]archive.ProjectActivation, error) {
+func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time, userHomes ...string) ([]archive.ProjectActivation, error) {
 	result := []archive.ProjectActivation{}
 	seen := map[string]bool{}
 	for _, project := range existing {
@@ -485,6 +489,10 @@ func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.
 		}
 		if root == "~" || strings.HasPrefix(root, "~/") {
 			home, e := os.UserHomeDir()
+			if len(userHomes) > 0 {
+				home = userHomes[0]
+				e = nil
+			}
 			if e != nil {
 				return nil, e
 			}
