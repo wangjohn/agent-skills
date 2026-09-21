@@ -95,6 +95,9 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		result.Scanned++
 		req := requestsByID[reg.ArchiveSessionID]
 
+		if err := local.SetScanPending(reg.ArchiveSessionID, true); err != nil {
+			return result, fmt.Errorf("journal pending scan: %w", err)
+		}
 		outcome, err := processSession(ctx, local, store, reg, req, now, opts)
 		if err != nil {
 			result.Errors[reg.ArchiveSessionID] = err
@@ -110,6 +113,11 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 				result.Errors[reg.ArchiveSessionID] = fmt.Errorf("complete request: %w", err)
 				pending++
 				continue
+			}
+		}
+		if outcome != outcomeRateLimited {
+			if err := local.SetScanPending(reg.ArchiveSessionID, false); err != nil {
+				return result, fmt.Errorf("complete pending scan: %w", err)
 			}
 		}
 		switch outcome {

@@ -104,11 +104,15 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 	if transactionPending(home) {
 		return nil
 	}
-	unlock, lockErr := local.NamedLock(home, "hooks.lock")
+	unlock, lockErr := local.NamedLockWait(home, "hooks.lock", time.Second)
 	if lockErr != nil {
 		return fmt.Errorf("capture registration busy; this hook was not recorded: %w", lockErr)
 	}
 	defer unlock()
+	// Setup may have started while this hook was waiting for the lock.
+	if transactionPending(home) {
+		return nil
+	}
 	cfg, found, err := config.Load(home)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)

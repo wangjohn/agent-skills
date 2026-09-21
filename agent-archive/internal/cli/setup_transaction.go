@@ -88,7 +88,11 @@ func pendingSessions(home string, cfg config.Config) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if requested[r.ArchiveSessionID] || !found || state == collector.CacheStatusRateLimited {
+		scanPending, err := store.ScanPending(r.ArchiveSessionID)
+		if err != nil {
+			return 0, err
+		}
+		if scanPending || requested[r.ArchiveSessionID] || !found || state == collector.CacheStatusRateLimited {
 			count++
 		}
 	}

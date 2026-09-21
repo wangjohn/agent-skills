@@ -227,3 +227,10 @@ coordination. Neither mode reads or deletes remote archives.
 If another operation is finishing, wait and retry. If launchd is unavailable,
 or a hook file was edited concurrently, resolve the reported problem and rerun
 uninstall. Do not remove the data directory by hand while a collector is running.
+
+### Downgrading after changing storage
+
+After changing buckets or storage folders, do not downgrade to a version that
+does not support `DestinationSince`. Older versions ignore this saved boundary
+and may upload earlier sessions to the new destination. Keep the current version
+until a supported downgrade procedure is available.

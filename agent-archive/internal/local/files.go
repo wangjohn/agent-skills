@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 func ID() (string, error) {
@@ -143,7 +144,26 @@ func NamedLock(home, name string) (func(), error) {
 	}
 	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		f.Close()
-		return nil, ErrBusy
+		if errors.Is(e, syscall.EWOULDBLOCK) || errors.Is(e, syscall.EAGAIN) {
+			return nil, ErrBusy
+		}
+		return nil, e
 	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// NamedLockWait tolerates short contention while preserving the hook deadline.
+func NamedLockWait(home, name string, timeout time.Duration) (func(), error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		unlock, err := NamedLock(home, name)
+		if !errors.Is(err, ErrBusy) {
+			return unlock, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, err
+		}
+		time.Sleep(min(10*time.Millisecond, remaining))
+	}
 }

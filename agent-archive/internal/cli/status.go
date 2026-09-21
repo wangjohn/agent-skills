@@ -89,6 +89,10 @@ func readStatus(env Env) (view statusView, err error) {
 		view.State = "Setup saved"
 		view.Next = "Run agent-archive setup to continue your saved choices."
 	}
+	if transactionPending(home) {
+		view.State = "Setup needs recovery"
+		view.Next = "Run agent-archive setup to recover the interrupted installation."
+	}
 	if !found {
 		return view, nil
 	}
