@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -63,7 +64,8 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	harness := fs.String("harness", "", "only sessions from this harness (codex, claude, cursor)")
 	model := fs.String("model", "", "only sessions that requested or observed this model")
 	skill := fs.String("skill", "", "only sessions involving this skill (see --skill-usage)")
-	skillUsage := fs.String("skill-usage", string(reader.SkillUsageUsed), "with --skill: used, available, or eligible_no_use")
+	skillSHA256 := fs.String("skill-sha256", "", "only sessions involving this exact lowercase skill SHA-256")
+	skillUsage := fs.String("skill-usage", string(reader.SkillUsageUsed), "with --skill/--skill-sha256: used, available, or eligible_no_use")
 	since := fs.String("since", "", "only sessions captured at or after this date (2026-01-31), RFC 3339 time, or age (7d, 12h)")
 	complete := fs.Bool("complete", false, "only sessions with complete parser coverage and no capture gaps")
 	if err := fs.Parse(args); err != nil {
@@ -73,7 +75,11 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: list: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, RequireCompleteCoverage: *complete}
+	if *skillSHA256 != "" && !validLowerSHA256(*skillSHA256) {
+		fmt.Fprintln(stderr, "agent-archive: list: --skill-sha256 must be exactly 64 lowercase hexadecimal characters")
+		return 2
+	}
+	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, SkillSHA256: *skillSHA256, RequireCompleteCoverage: *complete}
 	switch usage := reader.SkillUsage(*skillUsage); usage {
 	case reader.SkillUsageUsed, reader.SkillUsageAvailable, reader.SkillUsageEligibleNoUse:
 		filter.SkillUsage = usage
@@ -106,6 +112,9 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No archived sessions match.")
+		if filter.SkillUsage == reader.SkillUsageEligibleNoUse {
+			fmt.Fprintln(stdout, "Sessions without complete eligibility and use-observation evidence are excluded; an empty result does not prove no eligible sessions exist.")
+		}
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -118,7 +127,18 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%d session(s).\n", len(sessions))
+	if filter.SkillUsage == reader.SkillUsageEligibleNoUse {
+		fmt.Fprintln(stdout, "Sessions without complete eligibility and use-observation evidence are excluded.")
+	}
 	return 0
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // runShowCommand implements `agent-archive show <archive-session-id>`. By

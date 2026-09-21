@@ -111,11 +111,65 @@ func TestListFilters(t *testing.T) {
 	}
 }
 
+func TestListFiltersExactSkillHashFromMetadataOnly(t *testing.T) {
+	env, mem, id := publishedFixture(t)
+	key, err := archive.MetadataObjectKey("codex", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := mem.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first archive.Metadata
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatal(err)
+	}
+	hashA, hashB := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	first.SkillsUsed = []archive.SkillUse{{Name: "review", SHA256: hashA, Evidence: archive.SkillUseEvidenceNativeInvocation}}
+	first.SkillDetection = archive.SkillDetectionObserved
+	encoded, _ := json.Marshal(first)
+	if err := mem.Put(context.Background(), key, encoded); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.SessionID = id + "-v2"
+	second.SkillsUsed = []archive.SkillUse{{Name: "review", SHA256: hashB, Evidence: archive.SkillUseEvidenceNativeInvocation}}
+	secondKey, err := archive.MetadataObjectKey("codex", second.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ = json.Marshal(second)
+	if err := mem.Put(context.Background(), secondKey, encoded); err != nil {
+		t.Fatal(err)
+	}
+	// Catalog filtering must not load the source object.
+	if err := mem.Delete(context.Background(), first.SourceBundle.Key); err != nil {
+		t.Fatal(err)
+	}
+
+	for hash, ids := range map[string][2]string{
+		hashA: {id, second.SessionID},
+		hashB: {second.SessionID, id},
+	} {
+		wantID, rejectID := ids[0], ids[1]
+		var out, errOut bytes.Buffer
+		if code := Run([]string{"list", "--skill", "review", "--skill-sha256", hash}, nil, &out, &errOut, env); code != 0 {
+			t.Fatalf("hash=%s code=%d stderr=%s", hash, code, errOut.String())
+		}
+		if !strings.Contains(out.String(), wantID) || strings.Contains(out.String(), rejectID+"\t") {
+			t.Fatalf("hash=%s output=%s", hash, out.String())
+		}
+	}
+}
+
 func TestListRejectsBadArguments(t *testing.T) {
 	env, _, _ := publishedFixture(t)
 	for _, args := range [][]string{
 		{"list", "--since", "yesterday"},
 		{"list", "--skill-usage", "sometimes"},
+		{"list", "--skill-sha256", "abc"},
+		{"list", "--skill-sha256", strings.Repeat("A", 64)},
 		{"list", "extra"},
 		{"list", "--bogus"},
 		{"show"},
@@ -125,6 +179,17 @@ func TestListRejectsBadArguments(t *testing.T) {
 		if code := Run(args, nil, &out, &errOut, env); code != 2 {
 			t.Fatalf("%v: code=%d stdout=%s stderr=%s", args, code, out.String(), errOut.String())
 		}
+	}
+}
+
+func TestEligibleNoUseEmptyResultExplainsUnavailableEvidence(t *testing.T) {
+	env, _, _ := publishedFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"list", "--skill", "review", "--skill-usage", "eligible_no_use"}, nil, &out, &errOut, env); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "does not prove no eligible sessions exist") {
+		t.Fatalf("missing unavailable-evidence explanation: %s", out.String())
 	}
 }
 

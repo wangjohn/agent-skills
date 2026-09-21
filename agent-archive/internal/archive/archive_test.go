@@ -429,7 +429,7 @@ func TestNativeAndSupplementalSkillUseDedupeByName(t *testing.T) {
 	}
 }
 
-func TestEligibleSkillNotUsedMarksObservedNone(t *testing.T) {
+func TestEligibleSkillWithoutUseCoverageRemainsPartial(t *testing.T) {
 	now := time.Now()
 	b := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: now}, SupplementalEvidence: []SupplementalEvidence{{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "fs", Payload: map[string]any{"coverage": "eligible", "skills": []any{map[string]any{"name": "review", "sha256": "aaa"}}}}}}
 	ref := SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}
@@ -437,8 +437,8 @@ func TestEligibleSkillNotUsedMarksObservedNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.SkillDetection != SkillDetectionObservedNone {
-		t.Fatalf("SkillDetection=%q, want observed_none", m.SkillDetection)
+	if m.SkillDetection != SkillDetectionPartial {
+		t.Fatalf("SkillDetection=%q, want partial without complete use observation", m.SkillDetection)
 	}
 }
 

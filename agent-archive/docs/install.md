@@ -170,6 +170,7 @@ agent-archive list
 # Narrow it down. --since takes a date, an RFC 3339 time, or an age.
 agent-archive list --harness claude --model claude-opus-5 --since 7d
 agent-archive list --skill review --skill-usage eligible_no_use
+agent-archive list --skill review --skill-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 agent-archive list --complete   # complete parser coverage, no capture gaps
 
 # One session's metadata sidecar, as JSON.
@@ -226,6 +227,13 @@ are not appended again. Skill edits alone do not refresh inactive sessions.
 Each observation pass reads at most 4 MiB of instruction content; oversized,
 truncated, nested, and uninspected plugin content is marked as a coverage gap.
 Hooks do not perform this filesystem scan.
+
+`--skill-sha256` filters metadata only and does not download source bundles.
+This distinguishes sessions using different bytes under the same skill name.
+Current supported hook payloads do not expose both a complete eligible-skill
+set and complete use observation, so `eligible_no_use` remains unavailable
+for those harness versions instead of treating a missing use event as proof
+of non-use.
 
 ## Build from source
 

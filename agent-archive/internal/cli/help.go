@@ -57,10 +57,11 @@ Find sessions using metadata; does not download conversation content.
   --harness codex|claude|cursor   Filter by application
   --model NAME                   Filter by model
   --skill NAME                   Filter by skill
+  --skill-sha256 HEX             Filter by exact lowercase skill SHA-256
   --skill-usage used|available|eligible_no_use
   --since DATE|AGE               For example 2026-01-31 or 7d
   --complete                     Require complete parser coverage
-Example: agent-archive list --skill review-pr --since 7d
+Example: agent-archive list --skill review-pr --skill-sha256 HASH --since 7d
 `,
 	"show": `Usage: agent-archive show ID [--harness NAME] [--normalized]
 

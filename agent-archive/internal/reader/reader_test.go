@@ -110,6 +110,19 @@ func TestSkillAvailableEligibleEntrySurvivesLaterNonEligibleEntry(t *testing.T) 
 	}
 }
 
+func TestSkillHashOnlyFilterMatchesExactUsedVersion(t *testing.T) {
+	m := archive.Metadata{SkillsUsed: []archive.SkillUse{
+		{Name: "review", SHA256: strings.Repeat("a", 64)},
+		{Name: "deploy", SHA256: strings.Repeat("b", 64)},
+	}}
+	if !matches(m, Filter{SkillSHA256: strings.Repeat("b", 64)}) {
+		t.Fatal("hash-only filter excluded exact used version")
+	}
+	if matches(m, Filter{SkillSHA256: strings.Repeat("c", 64)}) {
+		t.Fatal("hash-only filter matched a different version")
+	}
+}
+
 func TestReadMetadataAndFindMetadataKeys(t *testing.T) {
 	metadata, _, store := fixture(t)
 	ctx := context.Background()
