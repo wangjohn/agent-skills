@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
@@ -17,6 +20,8 @@ import (
 // local.Lock(home) around Run; Run itself does not acquire it, so it stays
 // simple to call directly from tests.
 type Options struct {
+	// ParserVersion identifies metadata derivation independently of source capture.
+	ParserVersion string
 	AcceptSession func(archive.SessionRegistration) bool
 	// MachineID identifies this machine in published metadata. Required.
 	MachineID string
@@ -33,6 +38,10 @@ type Options struct {
 	// anyway (to preserve comparison evidence), so the zero value (false)
 	// matches that default rather than requiring every caller to opt in.
 	RequireSkillUse bool
+	// SupplementalEvidence observes non-transcript evidence such as the
+	// installed skill inventory. The collector merges stable observations
+	// without letting a new polling timestamp manufacture a new snapshot.
+	SupplementalEvidence func(archive.SessionRegistration, time.Time) ([]archive.SupplementalEvidence, error)
 }
 
 func (o Options) now() time.Time {
@@ -82,6 +91,12 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		return Result{}, fmt.Errorf("load requests: %w", err)
 	} else {
 		for _, req := range requests {
+			if req.Token == "" {
+				req, err = local.ensureRequestToken(req.ArchiveSessionID)
+				if err != nil {
+					return Result{}, fmt.Errorf("upgrade pending request: %w", err)
+				}
+			}
 			requestsByID[req.ArchiveSessionID] = req
 		}
 	}
@@ -104,27 +119,25 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 			pending++
 			continue
 		}
-		// The session was scanned without error: any pending request's hook
-		// evidence has been folded into this pass's candidate bundle (whether
-		// or not that candidate was actually published), so the request is
-		// fulfilled. Leaving it would only replay the same evidence forever.
-		if _, hadRequest := requestsByID[reg.ArchiveSessionID]; hadRequest {
-			if err := local.CompleteRequest(reg.ArchiveSessionID); err != nil {
-				result.Errors[reg.ArchiveSessionID] = fmt.Errorf("complete request: %w", err)
-				pending++
-				continue
-			}
+		_, requestPending, requestErr := local.loadRequest(reg.ArchiveSessionID)
+		if requestErr != nil {
+			return result, fmt.Errorf("check pending request: %w", requestErr)
 		}
-		if outcome != outcomeRateLimited {
+		_, uploadPending, uploadErr := local.LoadPending(reg.ArchiveSessionID)
+		if uploadErr != nil {
+			return result, fmt.Errorf("check pending publication: %w", uploadErr)
+		}
+		if !requestPending && !uploadPending {
 			if err := local.SetScanPending(reg.ArchiveSessionID, false); err != nil {
 				return result, fmt.Errorf("complete pending scan: %w", err)
 			}
+		} else {
+			pending++
 		}
 		switch outcome {
 		case outcomePublished:
 			result.Published = append(result.Published, reg.ArchiveSessionID)
 		case outcomeRateLimited:
-			pending++
 			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
 		case outcomeSkipped:
 			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
@@ -157,9 +170,33 @@ const (
 )
 
 func processSession(ctx context.Context, local *LocalStore, store storage.ObjectStore, reg archive.SessionRegistration, req Request, now time.Time, opts Options) (sessionOutcome, error) {
+	// A publication that may already have reached storage is immutable local
+	// work. Retry its exact bytes before considering later transcript changes.
+	pending, havePending, err := local.LoadPending(reg.ArchiveSessionID)
+	if err != nil {
+		return outcomeSkipped, err
+	}
+	if havePending {
+		newUrgentRequest := !pending.Attempted && req.Token != "" && req.Token != pending.RequestToken
+		if !newUrgentRequest {
+			if !pending.ReadyAt.IsZero() && now.Before(pending.ReadyAt) {
+				return outcomeRateLimited, nil
+			}
+			return publishPending(ctx, local, store, reg.ArchiveSessionID, pending, now, opts)
+		}
+		// A stop/end request is a natural debounce flush. A merely rate-limited,
+		// never-attempted candidate can be safely replaced by a richer one.
+	}
+	if !havePending {
+		if outcome, handled, err := regenerateMetadata(ctx, local, store, reg, now, opts); handled || err != nil {
+			return outcome, err
+		}
+	}
+
 	if reg.TranscriptPath == "" {
 		return outcomeSkipped, errors.New("registration has no transcript path")
 	}
+
 	adapter, err := archive.NewAdapter(reg.Harness.Name)
 	if err != nil {
 		return outcomeSkipped, err
@@ -171,15 +208,32 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		return outcomeSkipped, fmt.Errorf("filter transcript: %w", err)
 	}
 
-	prevBundle, prevPublishedAt, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
+	prevBundle, _, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("load published cache: %w", err)
 	}
 
+	lastPublished, lastPublishedAt, haveLastPublished, err := local.LoadLastPublished(reg.ArchiveSessionID)
+	if err != nil {
+		return outcomeSkipped, fmt.Errorf("load last published bundle: %w", err)
+	}
+	var observed []archive.SupplementalEvidence
+	if opts.SupplementalEvidence != nil {
+		observed, err = opts.SupplementalEvidence(reg, now)
+		if err != nil {
+			return outcomeSkipped, fmt.Errorf("collect supplemental evidence: %w", err)
+		}
+	}
+	baseEvidence := lastPublished.SupplementalEvidence
+	if havePrev {
+		baseEvidence = prevBundle.SupplementalEvidence
+	}
+	supplemental := mergeSupplementalEvidence(baseEvidence, observed, req.HookEvidence)
+
 	// now is a placeholder here; bundleEvidenceEqual ignores CapturedAt, so
 	// it has no effect on the comparison below. The real value is assigned
 	// once we know whether this is genuinely new evidence.
-	candidate, err := archive.NewSourceBundle(reg, adapter, filtered, now, req.HookEvidence)
+	candidate, err := archive.NewSourceBundle(reg, adapter, filtered, now, supplemental)
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("build source bundle: %w", err)
 	}
@@ -208,14 +262,20 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// Unchanged since the last actual publish, or since a policy
 		// decline: nothing to do. A decline is reconsidered only by a
 		// genuine further content change, never by time alone.
+		if req.Token != "" {
+			if _, err := local.CompleteRequest(reg.ArchiveSessionID, req.Token); err != nil {
+				return outcomeSkipped, fmt.Errorf("complete unchanged request: %w", err)
+			}
+		}
 		return outcomeSkipped, nil
 	}
 
-	if !prevPublishedAt.IsZero() && now.Sub(prevPublishedAt) < opts.minUploadInterval() {
-		if err := local.SavePublished(reg.ArchiveSessionID, candidate, prevPublishedAt, CacheStatusRateLimited); err != nil {
-			return outcomeSkipped, fmt.Errorf("cache rate-limited candidate: %w", err)
-		}
-		return outcomeRateLimited, nil
+	guardBundle, haveGuard := lastPublished, haveLastPublished
+	if havePrev {
+		guardBundle, haveGuard = prevBundle, true
+	}
+	if haveGuard && !nativeEvidenceExtends(guardBundle, candidate) {
+		return outcomeSkipped, errors.New("transcript was truncated, compacted, or rewritten; preserving the last published snapshot")
 	}
 
 	compressed, err := archive.BuildCompressedSource(candidate)
@@ -232,7 +292,7 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	}
 
 	reference := archive.SourceReference{Key: sourceKey, SHA256: compressed.SHA256, CompressedBytes: len(compressed.Bytes)}
-	metadata, buildErr := archive.BuildMetadata(candidate, opts.MachineID, reg.SessionStartedAt, now, reference, archive.ParserInfo{})
+	metadata, buildErr := archive.BuildMetadata(candidate, opts.MachineID, reg.SessionStartedAt, now, reference, archive.ParserInfo{Version: opts.parserVersion()})
 	if buildErr != nil && !archive.IsParseError(buildErr) {
 		return outcomeSkipped, fmt.Errorf("derive metadata: %w", buildErr)
 	}
@@ -252,8 +312,13 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// to the rate-limit check above once this decline is reconsidered
 		// by a later content change, rather than a manufactured timestamp
 		// making a genuinely-first publish look rate-limited.
-		if err := local.SavePublished(reg.ArchiveSessionID, candidate, time.Time{}, CacheStatusDeclined); err != nil {
+		if err := local.SavePublished(reg.ArchiveSessionID, candidate, lastPublishedAt, CacheStatusDeclined); err != nil {
 			return outcomeSkipped, fmt.Errorf("cache declined candidate: %w", err)
+		}
+		if req.Token != "" {
+			if _, err := local.CompleteRequest(reg.ArchiveSessionID, req.Token); err != nil {
+				return outcomeSkipped, fmt.Errorf("complete declined request: %w", err)
+			}
 		}
 		return outcomeSkipped, nil
 	}
@@ -263,36 +328,73 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		return outcomeSkipped, fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	if err := storage.PutSourceThenMetadata(ctx, store, sourceKey, metadataKey, compressed.Bytes, metadataBytes, opts.Retry); err != nil {
+	readyAt := now
+	if req.Token == "" && !lastPublishedAt.IsZero() && now.Sub(lastPublishedAt) < opts.minUploadInterval() {
+		readyAt = lastPublishedAt.Add(opts.minUploadInterval())
+	}
+	pending = PendingPublication{
+		Bundle: candidate, SourceKey: sourceKey, MetadataKey: metadataKey,
+		SourceSHA256: compressed.SHA256, SourceBytes: compressed.Bytes, MetadataBytes: metadataBytes,
+		RequestToken: req.Token, ReadyAt: readyAt,
+	}
+	if err := local.SavePending(reg.ArchiveSessionID, pending); err != nil {
+		return outcomeSkipped, fmt.Errorf("persist pending publication: %w", err)
+	}
+	if readyAt.After(now) {
+		if err := local.SavePublished(reg.ArchiveSessionID, candidate, lastPublishedAt, CacheStatusRateLimited); err != nil {
+			return outcomeSkipped, fmt.Errorf("cache rate-limited candidate: %w", err)
+		}
+		return outcomeRateLimited, nil
+	}
+	return publishPending(ctx, local, store, reg.ArchiveSessionID, pending, now, opts)
+}
+
+func publishPending(ctx context.Context, local *LocalStore, store storage.ObjectStore, id string, pending PendingPublication, now time.Time, opts Options) (sessionOutcome, error) {
+	if !storage.VerifySHA256(pending.SourceBytes, pending.SourceSHA256) {
+		return outcomeSkipped, errors.New("pending source checksum does not match its persisted bytes")
+	}
+	pending.Attempted = true
+	if err := local.SavePending(id, pending); err != nil {
+		return outcomeSkipped, fmt.Errorf("mark pending publication attempted: %w", err)
+	}
+	if err := storage.PutSourceThenMetadata(ctx, store, pending.SourceKey, pending.MetadataKey, pending.SourceBytes, pending.MetadataBytes, opts.Retry); err != nil {
 		return outcomeSkipped, fmt.Errorf("publish: %w", err)
 	}
-	// A previously *actually published* bundle (not a withheld or declined
-	// one, which were never the current pointer) is now superseded. Record
-	// it for retention to delete once its grace period elapses; it must
-	// stay downloadable until then; PutSourceThenMetadata has just made the
-	// new one the current pointer.
-	//
-	// The `err == nil` guards below are a deliberate, accepted gap: if
-	// either recomputation fails, the old snapshot is silently never
-	// recorded as superseded and so never cleaned up by retention — a
-	// storage leak, not a correctness or safety issue (the new source is
-	// already the live pointer regardless). Treating it as fatal here would
-	// be worse: PutSourceThenMetadata has already succeeded, so failing
-	// this session now would report a successful publish as an error and,
-	// since local.SavePublished below would never run, leave the local
-	// cache stale — causing a real, unwanted republish loop on every future
-	// pass instead of one already-orphaned snapshot.
-	if havePrev && prevStatus == CacheStatusPublished {
-		if prevCompressed, err := archive.BuildCompressedSource(prevBundle); err == nil {
-			if prevKey, err := archive.SourceObjectKey(prevBundle, prevCompressed.SHA256); err == nil && prevKey != sourceKey {
-				if err := local.RecordSuperseded(reg.ArchiveSessionID, prevKey, now); err != nil {
-					return outcomeSkipped, fmt.Errorf("record superseded source: %w", err)
-				}
+	previous, _, hadPrevious, err := local.LoadLastPublished(id)
+	if err != nil {
+		return outcomeSkipped, err
+	}
+	if hadPrevious {
+		compressed, err := archive.BuildCompressedSource(previous)
+		if err != nil {
+			return outcomeSkipped, fmt.Errorf("rebuild previous source reference: %w", err)
+		}
+		previousKey, err := archive.SourceObjectKey(previous, compressed.SHA256)
+		if err != nil {
+			return outcomeSkipped, fmt.Errorf("rebuild previous source reference: %w", err)
+		}
+		if previousKey != pending.SourceKey {
+			if err := local.RecordSuperseded(id, previousKey, now); err != nil {
+				return outcomeSkipped, fmt.Errorf("record superseded source: %w", err)
 			}
 		}
 	}
-	if err := local.SavePublished(reg.ArchiveSessionID, candidate, now, CacheStatusPublished); err != nil {
+	var saveErr error
+	if pending.MetadataOnly {
+		saveErr = local.saveRepublishedMetadata(id, pending, now)
+	} else {
+		saveErr = local.SavePublished(id, pending.Bundle, now, CacheStatusPublished, pending.MetadataBytes)
+	}
+	if err := saveErr; err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
+	}
+	if pending.RequestToken != "" {
+		if _, err := local.CompleteRequest(id, pending.RequestToken); err != nil {
+			return outcomeSkipped, fmt.Errorf("complete published request: %w", err)
+		}
+	}
+	if err := local.RemovePending(id); err != nil {
+		return outcomeSkipped, err
 	}
 	return outcomePublished, nil
 }
@@ -304,8 +406,30 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 // version, and the collector has no other way to tell which one it has
 // until it tries. Any other adapter, or any other kind of filter failure,
 // is returned as-is with no retry.
+const maxTranscriptBytes int64 = 64 * 1024 * 1024
+
 func filterTranscript(adapter archive.Adapter, reg archive.SessionRegistration) (archive.FilteredTranscript, error) {
-	filtered, err := filterJSONLFile(adapter, reg.TranscriptPath)
+	file, err := os.Open(reg.TranscriptPath)
+	if err != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("open transcript: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("stat transcript: %w", err)
+	}
+	boundary := info.Size()
+	if boundary > maxTranscriptBytes {
+		return archive.FilteredTranscript{}, fmt.Errorf("transcript exceeds %d-byte collection limit", maxTranscriptBytes)
+	}
+	if boundary < 0 {
+		return archive.FilteredTranscript{}, errors.New("transcript has invalid size")
+	}
+	jsonBoundary, err := completeJSONLBoundary(file, boundary)
+	if err != nil {
+		return archive.FilteredTranscript{}, fmt.Errorf("find complete transcript boundary: %w", err)
+	}
+	filtered, err := adapter.FilterJSONL(io.NewSectionReader(file, 0, jsonBoundary))
 	if err == nil {
 		return filtered, nil
 	}
@@ -313,28 +437,29 @@ func filterTranscript(adapter archive.Adapter, reg archive.SessionRegistration) 
 	if !ok || !errors.Is(err, archive.ErrUnsafeSourceFormat) {
 		return archive.FilteredTranscript{}, err
 	}
-	file, openErr := os.Open(reg.TranscriptPath)
-	if openErr != nil {
-		return archive.FilteredTranscript{}, fmt.Errorf("open transcript: %w", openErr)
-	}
-	defer file.Close()
-	return cursorAdapter.FilterText(file, reg.SessionStartedAt)
+	return cursorAdapter.FilterText(io.NewSectionReader(file, 0, boundary), reg.SessionStartedAt)
 }
 
-func filterJSONLFile(adapter archive.Adapter, path string) (archive.FilteredTranscript, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return archive.FilteredTranscript{}, fmt.Errorf("open transcript: %w", err)
+// completeJSONLBoundary ignores a final record while the harness is still
+// writing it. The file size was fixed by the caller before this check, and the
+// two-megabyte tail bound matches the adapter's maximum record size.
+func completeJSONLBoundary(file *os.File, boundary int64) (int64, error) {
+	if boundary == 0 {
+		return 0, nil
 	}
-	filtered, err := adapter.FilterJSONL(file)
-	closeErr := file.Close()
-	if err != nil {
-		return archive.FilteredTranscript{}, err
+	const maxRecordBytes int64 = 2 * 1024 * 1024
+	start := boundary - min(boundary, maxRecordBytes+1)
+	tail := make([]byte, boundary-start)
+	if _, err := file.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+		return 0, err
 	}
-	if closeErr != nil {
-		return archive.FilteredTranscript{}, fmt.Errorf("close transcript: %w", closeErr)
+	if tail[len(tail)-1] == '\n' || json.Valid(bytes.TrimSpace(tail[bytes.LastIndexByte(tail, '\n')+1:])) {
+		return boundary, nil
 	}
-	return filtered, nil
+	if lastNewline := bytes.LastIndexByte(tail, '\n'); lastNewline >= 0 {
+		return start + int64(lastNewline) + 1, nil
+	}
+	return boundary, nil
 }
 
 // bundleEvidenceEqual reports whether two source bundles carry the same
@@ -352,4 +477,46 @@ func bundleEvidenceEqual(a, b archive.SourceBundle) (bool, error) {
 		return false, err
 	}
 	return bytes.Equal(aBytes, bBytes), nil
+}
+
+func nativeEvidenceExtends(previous, candidate archive.SourceBundle) bool {
+	if previous.Capture.SourceFormat != candidate.Capture.SourceFormat || len(candidate.NativeRecords) < len(previous.NativeRecords) || len(candidate.NativeText) < len(previous.NativeText) {
+		return false
+	}
+	for i := range previous.NativeRecords {
+		if !reflect.DeepEqual(previous.NativeRecords[i], candidate.NativeRecords[i]) {
+			return false
+		}
+	}
+	for i := range previous.NativeText {
+		if previous.NativeText[i].Format != candidate.NativeText[i].Format || !strings.HasPrefix(candidate.NativeText[i].Content, previous.NativeText[i].Content) {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeSupplementalEvidence(existing []archive.SupplementalEvidence, groups ...[]archive.SupplementalEvidence) []archive.SupplementalEvidence {
+	out := append([]archive.SupplementalEvidence(nil), existing...)
+	for _, additions := range groups {
+		for _, evidence := range additions {
+			duplicate := false
+			for _, old := range out {
+				if old.Kind == evidence.Kind && old.Provenance == evidence.Provenance && supplementalPayloadEqual(old, evidence) && (old.ObservedAt.Equal(evidence.ObservedAt) || evidence.Kind == archive.EvidenceKindSkillInventory || evidence.Kind == archive.EvidenceKindSkillSnapshot) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, evidence)
+			}
+		}
+	}
+	return out
+}
+
+func supplementalPayloadEqual(a, b archive.SupplementalEvidence) bool {
+	aBytes, errA := json.Marshal(a.Payload)
+	bBytes, errB := json.Marshal(b.Payload)
+	return errA == nil && errB == nil && bytes.Equal(aBytes, bBytes)
 }
