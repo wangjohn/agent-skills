@@ -118,14 +118,39 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 
 // MergeSupplementalEvidence combines observations without allowing the time
 // of a repeated background scan to manufacture a new source snapshot.
-// Inventory and instruction-snapshot observations are state: a fresh value
-// replaces the previous value for the same producer and logical subject, but
-// an identical value retains its original observation time. Other evidence
-// is event-shaped and remains append-only.
+// Inventories form a history: a changed inventory is appended with its actual
+// observation time, while an unchanged latest inventory is omitted. Skill
+// snapshots retain every distinct filtered/original-hash version but do not
+// repeat identical bytes. Other evidence is event-shaped and remains
+// append-only, with exact retry duplicates removed.
 func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []SupplementalEvidence {
 	out := append([]SupplementalEvidence(nil), previous...)
 	for _, candidate := range fresh {
-		if !replaceableObservation(candidate.Kind) {
+		switch candidate.Kind {
+		case EvidenceKindSkillInventory:
+			identity := supplementalIdentity(candidate)
+			unchanged := false
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Kind == EvidenceKindSkillInventory && supplementalIdentity(out[i]) == identity {
+					unchanged = supplementalPayloadEqual(out[i].Payload, candidate.Payload)
+					break
+				}
+			}
+			if !unchanged {
+				out = append(out, candidate)
+			}
+		case EvidenceKindSkillSnapshot:
+			duplicate := false
+			for _, existing := range out {
+				if existing.Kind == EvidenceKindSkillSnapshot && supplementalIdentity(existing) == supplementalIdentity(candidate) && supplementalPayloadEqual(existing.Payload, candidate.Payload) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+		default:
 			duplicate := false
 			for _, existing := range out {
 				if supplementalEvidenceEqual(existing, candidate) {
@@ -136,27 +161,6 @@ func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []Supplem
 			if !duplicate {
 				out = append(out, candidate)
 			}
-			continue
-		}
-		if candidate.Kind == EvidenceKindSkillInventory {
-			out = pruneSupersededSkillSnapshots(out, candidate)
-		}
-		identity := supplementalIdentity(candidate)
-		replaced := false
-		for i := range out {
-			if !replaceableObservation(out[i].Kind) || supplementalIdentity(out[i]) != identity {
-				continue
-			}
-			if supplementalPayloadEqual(out[i].Payload, candidate.Payload) {
-				// Preserve the first observation time for unchanged state.
-				candidate.ObservedAt = out[i].ObservedAt
-			}
-			out[i] = candidate
-			replaced = true
-			break
-		}
-		if !replaced {
-			out = append(out, candidate)
 		}
 	}
 	return out
@@ -164,30 +168,6 @@ func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []Supplem
 
 func supplementalEvidenceEqual(a, b SupplementalEvidence) bool {
 	return a.Kind == b.Kind && a.Provenance == b.Provenance && a.ObservedAt.Equal(b.ObservedAt) && supplementalPayloadEqual(a.Payload, b.Payload)
-}
-
-func pruneSupersededSkillSnapshots(in []SupplementalEvidence, inventory SupplementalEvidence) []SupplementalEvidence {
-	scope := firstString(inventory.Payload, "scope")
-	active := map[string]bool{}
-	if skills, ok := inventory.Payload["skills"].([]any); ok {
-		for _, raw := range skills {
-			if skill, ok := raw.(map[string]any); ok {
-				active[firstString(skill, "name")] = true
-			}
-		}
-	}
-	out := in[:0]
-	for _, existing := range in {
-		if existing.Kind == EvidenceKindSkillSnapshot && existing.Provenance == inventory.Provenance && firstString(existing.Payload, "scope") == scope && !active[firstString(existing.Payload, "name")] {
-			continue
-		}
-		out = append(out, existing)
-	}
-	return out
-}
-
-func replaceableObservation(kind SupplementalEvidenceKind) bool {
-	return kind == EvidenceKindSkillInventory || kind == EvidenceKindSkillSnapshot
 }
 
 func supplementalIdentity(e SupplementalEvidence) string {

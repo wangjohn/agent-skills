@@ -20,6 +20,7 @@ import (
 const (
 	maxSkillsPerRoot = 256
 	maxSkillBytes    = 1 << 20
+	maxSnapshotBytes = 4 << 20
 )
 
 // SkillOptions identifies the only filesystem locations a background
@@ -48,9 +49,10 @@ func ObserveSkills(options SkillOptions) ([]archive.SupplementalEvidence, error)
 		return nil, errors.New("skill observation time is required")
 	}
 	roots := skillRoots(options)
+	remainingSnapshotBytes := int64(maxSnapshotBytes)
 	var observations []archive.SupplementalEvidence
 	for _, root := range roots {
-		evidence, err := observeRoot(options.Harness, root, options.ObservedAt)
+		evidence, err := observeRoot(options.Harness, root, options.ObservedAt, &remainingSnapshotBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -79,19 +81,20 @@ func skillRoots(options SkillOptions) []skillRoot {
 	}
 	switch strings.ToLower(strings.TrimSpace(options.Harness)) {
 	case "codex":
-		add(user, ".agents/skills", "user")
-		add(project, ".agents/skills", "project")
+		add(user, ".agents/skills", "user_agents")
+		add(user, ".codex/skills", "user_codex_legacy")
+		add(project, ".agents/skills", "project_agents")
 	case "claude", "claude-code":
-		add(user, ".claude/skills", "user")
-		add(project, ".claude/skills", "project")
+		add(user, ".claude/skills", "user_claude")
+		add(project, ".claude/skills", "project_claude")
 	case "cursor":
-		add(user, ".cursor/skills", "user")
-		add(project, ".cursor/skills", "project")
+		add(user, ".cursor/skills", "user_cursor")
+		add(project, ".cursor/skills", "project_cursor")
 	}
 	return roots
 }
 
-func observeRoot(harness string, root skillRoot, observedAt time.Time) ([]archive.SupplementalEvidence, error) {
+func observeRoot(harness string, root skillRoot, observedAt time.Time, remainingSnapshotBytes *int64) ([]archive.SupplementalEvidence, error) {
 	entries, err := os.ReadDir(root.path)
 	if errors.Is(err, os.ErrNotExist) {
 		// Absence is not evidence that no skills were available. Emit nothing
@@ -102,16 +105,29 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time) ([]archiv
 		return nil, fmt.Errorf("read %s skill inventory: %w", root.scope, err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	omittedEntries := 0
 	if len(entries) > maxSkillsPerRoot {
+		omittedEntries = len(entries) - maxSkillsPerRoot
 		entries = entries[:maxSkillsPerRoot]
 	}
 	provenance := "filesystem:" + strings.ToLower(strings.TrimSpace(harness))
 	var inventory []any
 	var snapshots []archive.SupplementalEvidence
+	omittedSnapshots := 0
+	uninspectedEntries := 0
 	for _, entry := range entries {
 		path := filepath.Join(root.path, entry.Name(), "SKILL.md")
 		info, err := os.Stat(path) // follows supported skill-directory symlinks
-		if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+		if errors.Is(err, os.ErrNotExist) {
+			// Some legacy/configured roots contain grouped or plugin-managed
+			// subtrees. We do not recursively walk them; record the coverage gap.
+			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				uninspectedEntries++
+			}
+			continue
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			uninspectedEntries++
 			continue
 		}
 		if err != nil {
@@ -123,15 +139,20 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time) ([]archiv
 			"uncertainty": "filesystem presence does not prove discovery, eligibility, or invocation",
 		}
 		if info.Size() > maxSkillBytes {
-			payload["uncertainty"] = "instruction snapshot omitted because the source exceeded the size limit"
 			inventory = append(inventory, map[string]any{"name": name})
-			snapshots = append(snapshots, archive.SupplementalEvidence{Kind: archive.EvidenceKindSkillSnapshot, ObservedAt: observedAt, Provenance: provenance, Payload: payload})
+			omittedSnapshots++
+			continue
+		}
+		if info.Size() > *remainingSnapshotBytes {
+			inventory = append(inventory, map[string]any{"name": name})
+			omittedSnapshots++
 			continue
 		}
 		original, err := readBounded(path, maxSkillBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read %s skill %q: %w", root.scope, entry.Name(), err)
 		}
+		*remainingSnapshotBytes -= int64(len(original))
 		if parsed := frontmatterName(original); parsed != "" {
 			name = parsed
 			payload["name"] = name
@@ -156,17 +177,27 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time) ([]archiv
 		inventory = append(inventory, map[string]any{"name": name, "sha256": hash})
 		snapshots = append(snapshots, filtered[0])
 	}
-	if len(inventory) == 0 {
+	totalOmittedEntries := omittedEntries + uninspectedEntries
+	if len(inventory) == 0 && totalOmittedEntries == 0 {
 		// An empty directory does not establish that the harness had no
 		// bundled, synced, managed, or otherwise non-filesystem skills.
 		return nil, nil
 	}
+	inventoryPayload := map[string]any{
+		"coverage": string(archive.SkillCoverageInstalledOnly), "scope": root.scope, "skills": inventory,
+		"inventory_complete": totalOmittedEntries == 0,
+		"uncertainty":        "bounded filesystem inventory does not prove discovery or eligibility in this session",
+	}
+	if totalOmittedEntries > 0 {
+		inventoryPayload["truncated"] = true
+		inventoryPayload["omitted_count"] = float64(totalOmittedEntries)
+	}
+	if omittedSnapshots > 0 {
+		inventoryPayload["snapshot_omitted_count"] = float64(omittedSnapshots)
+	}
 	result := []archive.SupplementalEvidence{{
 		Kind: archive.EvidenceKindSkillInventory, ObservedAt: observedAt, Provenance: provenance,
-		Payload: map[string]any{
-			"coverage": string(archive.SkillCoverageInstalledOnly), "scope": root.scope, "skills": inventory,
-			"uncertainty": "filesystem presence does not prove discovery or eligibility in this session",
-		},
+		Payload: inventoryPayload,
 	}}
 	return append(result, snapshots...), nil
 }
