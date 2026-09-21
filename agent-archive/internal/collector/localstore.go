@@ -188,6 +188,29 @@ func (s *LocalStore) loadRequest(archiveSessionID string) (Request, bool, error)
 	return req, true, nil
 }
 
+// ensureRequestToken upgrades a request written by an older collector. The
+// token is assigned under the same lock used by hooks and acknowledgements so
+// migration cannot overwrite a concurrent hook update.
+func (s *LocalStore) ensureRequestToken(archiveSessionID string) (Request, error) {
+	unlock, err := local.NamedLockWait(s.home, filepath.Join("request-locks", archiveSessionID+".lock"), time.Second)
+	if err != nil {
+		return Request{}, fmt.Errorf("lock request %q: %w", archiveSessionID, err)
+	}
+	defer unlock()
+	request, found, err := s.loadRequest(archiveSessionID)
+	if err != nil || !found || request.Token != "" {
+		return request, err
+	}
+	request.Token, err = local.ID()
+	if err != nil {
+		return Request{}, fmt.Errorf("generate request token: %w", err)
+	}
+	if err := local.Write(s.requestPath(archiveSessionID), request); err != nil {
+		return Request{}, fmt.Errorf("upgrade request %q: %w", archiveSessionID, err)
+	}
+	return request, nil
+}
+
 // LoadRequests returns every pending request, sorted by archive session ID.
 func (s *LocalStore) LoadRequests() ([]Request, error) {
 	dir := filepath.Join(s.home, "requests")

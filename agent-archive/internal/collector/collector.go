@@ -91,6 +91,12 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		return Result{}, fmt.Errorf("load requests: %w", err)
 	} else {
 		for _, req := range requests {
+			if req.Token == "" {
+				req, err = local.ensureRequestToken(req.ArchiveSessionID)
+				if err != nil {
+					return Result{}, fmt.Errorf("upgrade pending request: %w", err)
+				}
+			}
 			requestsByID[req.ArchiveSessionID] = req
 		}
 	}
@@ -488,28 +494,6 @@ func mergeSupplementalEvidence(existing []archive.SupplementalEvidence, groups .
 	out := append([]archive.SupplementalEvidence(nil), existing...)
 	for _, additions := range groups {
 		for _, evidence := range additions {
-			if evidence.Kind == archive.EvidenceKindSkillInventory {
-				unchanged := false
-				for _, old := range out {
-					if old.Kind == evidence.Kind && old.Provenance == evidence.Provenance && supplementalPayloadEqual(old, evidence) {
-						unchanged = true
-						break
-					}
-				}
-				if unchanged {
-					continue
-				}
-				coverage, _ := evidence.Payload["coverage"].(string)
-				kept := out[:0]
-				for _, old := range out {
-					oldCoverage, _ := old.Payload["coverage"].(string)
-					if old.Provenance == evidence.Provenance && (old.Kind == archive.EvidenceKindSkillSnapshot || (old.Kind == archive.EvidenceKindSkillInventory && oldCoverage == coverage)) {
-						continue
-					}
-					kept = append(kept, old)
-				}
-				out = kept
-			}
 			duplicate := false
 			for _, old := range out {
 				if old.Kind == evidence.Kind && old.Provenance == evidence.Provenance && supplementalPayloadEqual(old, evidence) && (old.ObservedAt.Equal(evidence.ObservedAt) || evidence.Kind == archive.EvidenceKindSkillInventory || evidence.Kind == archive.EvidenceKindSkillSnapshot) {
