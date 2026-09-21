@@ -42,13 +42,9 @@ Macs are supported.
    agent-archive --version
    ```
 
-   The first time macOS runs a downloaded binary it may show a Gatekeeper
-   prompt. Release builds are signed and notarized by Apple once the
-   maintainers' signing credentials are configured (see
-   [Signing and notarization](#signing-and-notarization) below); until
-   then, or for a build you made yourself, right-click the binary in
-   Finder and choose **Open** once to approve it, or run
-   `xattr -d com.apple.quarantine` on the installed binary.
+   Published release binaries must be signed and accepted by Apple's notary
+   service. Gatekeeper may need network access to check the notarization ticket
+   on first launch. Unsigned local development builds are not release artifacts.
 
    To upgrade later, remove or `mv` the old binary before putting the new
    one in place. Overwriting it in place with `cp` can leave macOS refusing
@@ -261,11 +257,15 @@ verify them without a manual approval step. This requires an Apple
 Developer Program membership and its associated credentials
 (a Developer ID Application certificate, an app-specific password, and a
 team ID) configured as repository secrets, plus the
-`APPLE_SIGNING_ENABLED` repository variable set to `true` to opt the
-release workflow into using them. Until those credentials are configured,
-the workflow still builds, checksums, and publishes unsigned binaries —
-see [Install a release build](#install-a-release-build) above for the
-one-time Gatekeeper approval an unsigned binary needs.
+`APPLE_SIGNING_ENABLED` repository variable set to `true`. A tagged release
+fails before building if the flag or any required signing secret is missing.
+Signing, signature verification, and accepted notarization are mandatory before
+publishing either architecture. Local `scripts/build-release.sh` builds remain
+unsigned and are suitable for development checks only.
+
+Required secrets: `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and
+`APPLE_APP_SPECIFIC_PASSWORD`. Do not put these values in repository files.
 
 ## Uninstalling
 

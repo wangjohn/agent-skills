@@ -19,7 +19,7 @@ Prepare a small factual packet: snapshot identity and location, access to the fu
 Start fresh workers, sessions, or processes without inherited conversation history. Disable history inheritance explicitly (for example, `fork_turns="none"` where supported). Give each the same snapshot and only its role instructions. Different prompts in one conversation do not provide isolation. Keep reports outside the reviewed source tree and do not share either pass's findings or progress with the other.
 
 - **Native reviewer:** Invoke the host's actual native review facility, preserving its bug-finding behavior. Do not supply this coordinator workflow or the design instructions. A generic bug-finding worker is not a native review.
-- **Design reviewer:** Supply the factual packet and [design-review.md](references/design-review.md). Ask for the change map, ready-to-use design sections, incidental defects, and coverage notes. Do not invoke this coordinator again.
+- **Design reviewer:** Supply the factual packet and [design-review.md](references/design-review.md). Ask for the change summary, change map, ready-to-use design sections, incidental defects, and coverage notes. Do not invoke this coordinator again.
 
 Prefer concurrent execution when supported. Sequential execution is acceptable when the host requires it, but still use fresh contexts. For design-only requests, skip native review and reconciliation with native findings. Reuse an available completed native review when its snapshot and scope match; do not expose its findings to the design worker.
 
@@ -37,7 +37,7 @@ Revisit the prior review findings withheld from the workers and account for rele
 
 ## Deliver one report
 
-Start with a compact snapshot and pass-status line, followed by at most two sentences about the change. Use exactly this section order:
+Start with a compact snapshot and pass-status line, followed by a summary of two to five sentences as unheaded prose. Reuse the design pass's change summary for what the code does and how; when that pass failed, write it from the prepared metadata and diff. Add the author's stated reason only when the PR description gives one, labeled as the author's statement. End with the one finding or decision to read first, and a count of supported defects and design decisions, such as "Native review found one supported defect; design review raised two decisions." Do not give an overall verdict here, restate the change map, or assign severities to design questions. Then use exactly this section order:
 
 1. **Change map.** Verified file totals and additions/removals, then the compact area table from the design pass. If that pass failed, build the map from the prepared metadata. Label missing or partial statistics.
 2. **Design decisions.** Concrete headings, linked source excerpts, effects, and recommendations or specific questions. Keep consequential valid choices even when native review finds no bugs. Do not assign bug severities to design questions.
