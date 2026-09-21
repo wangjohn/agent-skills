@@ -165,6 +165,9 @@ func readStatus(env Env) (view statusView, err error) {
 			}
 			app.Sessions++
 			app.HookObserved = true
+			if issue := view.Collector.SessionIssues[reg.ArchiveSessionID]; issue != "" {
+				app.CaptureGaps = append(app.CaptureGaps, archive.CaptureGap{Code: issue, Detail: "Last scan could not update this session; retained evidence was kept. Run agent-archive sync for the failure."})
+			}
 			if reg.Harness.Version != "" && !containsString(app.HarnessVersions, reg.Harness.Version) {
 				app.HarnessVersions = append(app.HarnessVersions, reg.Harness.Version)
 			}

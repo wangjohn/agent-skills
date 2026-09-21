@@ -420,10 +420,11 @@ func (s *LocalStore) RemovePending(id string) error {
 // Status summarizes the collector's local state for a future `status`
 // command. It never includes transcript content.
 type Status struct {
-	LastScanAt      time.Time `json:"last_scan_at"`
-	LastPublishedAt time.Time `json:"last_published_at,omitempty"`
-	PendingCount    int       `json:"pending_count"`
-	LastError       string    `json:"last_error,omitempty"`
+	SessionIssues   map[string]string `json:"session_issues,omitempty"`
+	LastScanAt      time.Time         `json:"last_scan_at"`
+	LastPublishedAt time.Time         `json:"last_published_at,omitempty"`
+	PendingCount    int               `json:"pending_count"`
+	LastError       string            `json:"last_error,omitempty"`
 }
 
 func (s *LocalStore) statusPath() string { return filepath.Join(s.home, "status.json") }

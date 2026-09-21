@@ -120,7 +120,8 @@ Macs are supported.
    and read-back-verified evidence. Verification includes its timestamp and
    configuration identity; it describes the checked publication, not continuous
    remote monitoring. The background collector checks storage access with one
-   synthetic round trip for a new configuration and retries failed checks.
+   synthetic round trip for a new configuration, retries failed checks, and
+   refreshes the check after five minutes.
    Authentication evidence identifies whether it came from manual sync or the
    background environment. Unexposed app versions and trust remain unknown.
 

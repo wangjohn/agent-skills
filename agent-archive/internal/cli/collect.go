@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
@@ -154,6 +155,26 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		}
 	}
 	if len(result.Errors) > 0 {
+		state, readErr := localStore.LoadStatus()
+		if readErr != nil {
+			return result, readErr
+		}
+		state.SessionIssues = map[string]string{}
+		for id, issue := range result.Errors {
+			code := "capture_or_publication_failed"
+			switch {
+			case strings.Contains(issue.Error(), "truncated, compacted, or rewritten"):
+				code = "transcript_discontinuity"
+			case strings.Contains(issue.Error(), "collection limit"):
+				code = "transcript_size_limit"
+			case strings.Contains(issue.Error(), "read-back verification"):
+				code = "read_back_failed"
+			}
+			state.SessionIssues[id] = code
+		}
+		if err := localStore.SaveStatus(state); err != nil {
+			return result, err
+		}
 		recordPreflightError(localStore, fmt.Errorf("%d session(s) need capture, publication, or read-back verification", len(result.Errors)))
 	}
 
