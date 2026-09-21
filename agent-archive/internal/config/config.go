@@ -109,7 +109,7 @@ func (c Config) AcceptSession(r archive.SessionRegistration) bool {
 	}
 	for _, p := range c.Archive.Projects {
 		if p.Included && p.Root == r.ProjectRoot {
-			return true
+			return p.ActivatedAt.IsZero() || !r.SessionStartedAt.Before(p.ActivatedAt)
 		}
 	}
 	return len(c.Archive.Projects) == 0 // older programmatic configurations
