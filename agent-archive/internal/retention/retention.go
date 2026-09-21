@@ -9,7 +9,9 @@ package retention
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
@@ -83,7 +85,41 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 		return fmt.Errorf("load published cache: %w", err)
 	}
 
-	if opts.SessionMaxAge > 0 && found && !bundle.Capture.CapturedAt.IsZero() && now.Sub(bundle.Capture.CapturedAt) >= opts.SessionMaxAge {
+	superseded, err := local.LoadSuperseded(reg.ArchiveSessionID)
+	if err != nil {
+		return fmt.Errorf("load superseded sources: %w", err)
+	}
+	locallyExpired := opts.SessionMaxAge > 0 && found && !bundle.Capture.CapturedAt.IsZero() && now.Sub(bundle.Capture.CapturedAt) >= opts.SessionMaxAge
+	if !locallyExpired && len(superseded) == 0 {
+		return nil
+	}
+
+	metadataKey, err := archive.MetadataObjectKey(reg.Harness.Name, reg.ArchiveSessionID)
+	if err != nil {
+		return err
+	}
+	data, remoteErr := store.Get(ctx, metadataKey)
+	var metadata archive.Metadata
+	if remoteErr == nil {
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return fmt.Errorf("decode current metadata: %w", err)
+		}
+		if err := metadata.ValidateSourceReference(); err != nil {
+			return fmt.Errorf("invalid current metadata: %w", err)
+		}
+		if metadata.SessionID != reg.ArchiveSessionID || metadata.Harness.Name != reg.Harness.Name || !strings.HasPrefix(metadata.SourceBundle.Key, fmt.Sprintf("sessions/%s/%s/", reg.Harness.Name, reg.ArchiveSessionID)) {
+			return fmt.Errorf("current metadata belongs to another session")
+		}
+	} else if !errors.Is(remoteErr, storage.ErrNotFound) {
+		return fmt.Errorf("read current metadata before cleanup: %w", remoteErr)
+	}
+	// Protect evidence published remotely just before a local acknowledgement failed.
+	capturedAt := bundle.Capture.CapturedAt
+	if remoteErr == nil && metadata.CapturedAt.After(capturedAt) {
+		capturedAt = metadata.CapturedAt
+	}
+
+	if opts.SessionMaxAge > 0 && found && !capturedAt.IsZero() && now.Sub(capturedAt) >= opts.SessionMaxAge {
 		if err := deleteWholeSession(ctx, store, reg.Harness.Name, reg.ArchiveSessionID); err != nil {
 			return fmt.Errorf("delete session: %w", err)
 		}
@@ -94,38 +130,22 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 		return nil
 	}
 
-	superseded, err := local.LoadSuperseded(reg.ArchiveSessionID)
-	if err != nil {
-		return fmt.Errorf("load superseded sources: %w", err)
-	}
 	if len(superseded) == 0 {
 		return nil
 	}
 
-	// The remote pointer is authoritative, including when the local cache
-	// contains a newer candidate that has not been published yet.
-	metadataKey, err := archive.MetadataObjectKey(reg.Harness.Name, reg.ArchiveSessionID)
-	if err != nil {
-		return err
-	}
-	data, err := store.Get(ctx, metadataKey)
-	if err != nil {
-		return fmt.Errorf("read current metadata before cleanup: %w", err)
-	}
-	var metadata archive.Metadata
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return fmt.Errorf("decode current metadata: %w", err)
+	if remoteErr != nil {
+		return fmt.Errorf("current metadata is missing; preserve superseded sources")
 	}
 	currentKey := metadata.SourceBundle.Key
-	if currentKey == "" {
-		return fmt.Errorf("current metadata has no source reference")
-	}
-	// Keep the most recently superseded source indefinitely as the predecessor.
-	// Equal timestamps are protected together rather than choosing arbitrarily.
-	var predecessorAt time.Time
+	// Append order records supersession order even if the clock moves backward.
+	var predecessorKey string
 	for _, s := range superseded {
-		if s.Key != currentKey && s.SupersededAt.After(predecessorAt) {
-			predecessorAt = s.SupersededAt
+		if !strings.HasPrefix(s.Key, fmt.Sprintf("sessions/%s/%s/source.", reg.Harness.Name, reg.ArchiveSessionID)) {
+			return fmt.Errorf("superseded source belongs to another session")
+		}
+		if s.Key != currentKey {
+			predecessorKey = s.Key
 		}
 	}
 	for _, s := range superseded {
@@ -137,7 +157,7 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 			}
 			continue
 		}
-		if s.SupersededAt.Equal(predecessorAt) || now.Sub(s.SupersededAt) < opts.gracePeriod() {
+		if s.Key == predecessorKey || now.Sub(s.SupersededAt) < opts.gracePeriod() {
 			continue
 		}
 		if err := store.Delete(ctx, s.Key); err != nil {

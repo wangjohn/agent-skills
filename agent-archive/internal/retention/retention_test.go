@@ -320,3 +320,55 @@ func TestWholeSessionDeletionFailureNeverLeavesDanglingPointer(t *testing.T) {
 		})
 	}
 }
+
+func TestRetentionProtectsNewerRemoteCaptureAndClockRollbackPredecessor(t *testing.T) {
+	local := newTestStore(t)
+	remote := storage.NewMemoryStore()
+	at := time.Now().UTC()
+	dir := t.TempDir()
+	first := publishTwice(t, local, remote, "s1", dir, at)
+	second := fetchMetadata(t, remote, "codex", "s1").SourceBundle.Key
+	publishThird(t, local, remote, "s1", dir, at.Add(time.Hour))
+	ledger, err := local.LoadSuperseded("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The second supersession happened after clock correction, but is newer in order.
+	ledger[0].SupersededAt = at.Add(2 * time.Hour)
+	ledger[1].SupersededAt = at
+	for _, entry := range ledger {
+		if err := local.RemoveSuperseded("s1", entry.Key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range ledger {
+		if err := local.RecordSuperseded("s1", entry.Key, entry.SupersededAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Sweep(context.Background(), local, remote, Options{Now: func() time.Time { return at.Add(48 * time.Hour) }})
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	if _, err := remote.Get(context.Background(), first); err == nil {
+		t.Fatal("older snapshot retained")
+	}
+	if _, err := remote.Get(context.Background(), second); err != nil {
+		t.Fatal("immediate predecessor deleted", err)
+	}
+	// Simulate remote success with stale local acknowledgement before expiry.
+	metadata := fetchMetadata(t, remote, "codex", "s1")
+	metadata.CapturedAt = at.Add(95 * 24 * time.Hour)
+	key, _ := archive.MetadataObjectKey("codex", "s1")
+	data, _ := json.Marshal(metadata)
+	if err := remote.Put(context.Background(), key, data); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Sweep(context.Background(), local, remote, Options{Now: func() time.Time { return at.Add(100 * 24 * time.Hour) }, SessionMaxAge: 90 * 24 * time.Hour})
+	if err != nil || len(result.Errors) != 0 || len(result.DeletedSessions) != 0 {
+		t.Fatalf("deleted newer remote evidence: %#v %v", result, err)
+	}
+	if _, err := remote.Get(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+}
