@@ -27,6 +27,15 @@ Macs are supported.
    sudo mv agent-archive-darwin-* /usr/local/bin/agent-archive
    ```
 
+   On an Apple Silicon Mac with Homebrew, `/usr/local/bin` may not exist
+   at all. Either create it first (`sudo mkdir -p /usr/local/bin`) or use
+   Homebrew's directory, which is already on your `PATH` and needs no
+   `sudo`:
+
+   ```sh
+   mv agent-archive-darwin-* /opt/homebrew/bin/agent-archive
+   ```
+
 4. Confirm it runs and check the version:
 
    ```sh
@@ -39,7 +48,11 @@ Macs are supported.
    [Signing and notarization](#signing-and-notarization) below); until
    then, or for a build you made yourself, right-click the binary in
    Finder and choose **Open** once to approve it, or run
-   `xattr -d com.apple.quarantine /usr/local/bin/agent-archive`.
+   `xattr -d com.apple.quarantine` on the installed binary.
+
+   To upgrade later, remove or `mv` the old binary before putting the new
+   one in place. Overwriting it in place with `cp` can leave macOS refusing
+   to launch it (it is killed at startup) until the file is recreated.
 
 5. Run the guided setup:
 
@@ -137,7 +150,8 @@ before touching anything. On confirmation it:
 
 Nothing in your bucket is read, listed, or deleted: every archived session
 stays exactly where it is. The binary itself is left in place; remove it
-with `rm /usr/local/bin/agent-archive` (or wherever you put it).
+with `rm /usr/local/bin/agent-archive` (or `rm /opt/homebrew/bin/agent-archive`,
+or wherever you put it).
 
 If the command cannot complete (for example, launchd is not reachable or a
 hook file was edited concurrently), it says which step failed and leaves the

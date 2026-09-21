@@ -27,32 +27,10 @@ func Home() (string, error) {
 		}
 		path = filepath.Join(home, ".local/share/agent-archive")
 	}
-	path, e := filepath.Abs(path)
+	path, e := ResolveExistingSymlinks(path)
 	if e != nil {
-		return "", e
+		return "", errors.New("invalid archive directory")
 	}
-	// Resolve the deepest existing ancestor so symlinked paths cannot bypass the
-	// Git-checkout exclusion before the final directory exists.
-	ancestor := path
-	for {
-		if _, e = os.Stat(ancestor); e == nil {
-			break
-		}
-		next := filepath.Dir(ancestor)
-		if next == ancestor {
-			return "", errors.New("invalid archive directory")
-		}
-		ancestor = next
-	}
-	real, e := filepath.EvalSymlinks(ancestor)
-	if e != nil {
-		return "", e
-	}
-	rel, e := filepath.Rel(ancestor, path)
-	if e != nil {
-		return "", e
-	}
-	path = filepath.Join(real, rel)
 	for p := path; ; p = filepath.Dir(p) {
 		if _, e = os.Stat(filepath.Join(p, ".git")); e == nil {
 			return "", errors.New("archive storage must be outside Git checkouts")
@@ -69,6 +47,39 @@ func Home() (string, error) {
 	}
 	return path, nil
 }
+
+// ResolveExistingSymlinks returns path made absolute with symlinks resolved
+// through its deepest existing ancestor, so a path that does not exist yet
+// still lands where it will really be created. Paths compared lexically
+// elsewhere (project roots, the archive directory) must go through this
+// first, or a symlinked spelling never matches the real one.
+func ResolveExistingSymlinks(path string) (string, error) {
+	path, e := filepath.Abs(path)
+	if e != nil {
+		return "", e
+	}
+	ancestor := path
+	for {
+		if _, e = os.Stat(ancestor); e == nil {
+			break
+		}
+		next := filepath.Dir(ancestor)
+		if next == ancestor {
+			return "", errors.New("no existing ancestor for " + path)
+		}
+		ancestor = next
+	}
+	real, e := filepath.EvalSymlinks(ancestor)
+	if e != nil {
+		return "", e
+	}
+	rel, e := filepath.Rel(ancestor, path)
+	if e != nil {
+		return "", e
+	}
+	return filepath.Join(real, rel), nil
+}
+
 func Write(path string, value any) error {
 	b, e := json.MarshalIndent(value, "", "  ")
 	if e != nil {
