@@ -150,13 +150,14 @@ func readStatus(env Env) (view statusView, err error) {
 	if err != nil {
 		return view, err
 	}
+	executable, executableErr := env.executable()
 	for i := range view.Apps {
-		changes, e := hooks.PlanRemoval(userHome, []string{view.Apps[i].Name})
+		installed, e := hooks.Installed(userHome, executable, view.Apps[i].Name)
 		switch {
-		case e != nil:
+		case e != nil || executableErr != nil:
 			view.Apps[i].Hooks = "unknown"
-		case len(changes) == 0:
-			view.Apps[i].Hooks = "missing"
+		case !installed:
+			view.Apps[i].Hooks = "missing or incomplete"
 		default:
 			view.Apps[i].Hooks = "installed"
 		}

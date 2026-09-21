@@ -210,7 +210,21 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 			e = storage.VerifyAccess(ctx, store, draft.Config.Storage.Prefix)
 			cancel()
 			if e != nil {
-				return fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", e)
+				failure := fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", e)
+				fmt.Fprintln(out, failure)
+				choice, promptErr := promptChoice(p, "Edit storage settings, retry, or cancel", "cancel", "edit", "retry", "cancel")
+				if promptErr != nil || choice == "cancel" {
+					return failure
+				}
+				if choice == "edit" {
+					if err = editSetupReview(p, &draft, userHome); err != nil {
+						return err
+					}
+					if err = save(); err != nil {
+						return err
+					}
+				}
+				continue
 			}
 			draft.Config.StorageVerifiedAt = env.now().UTC()
 			verifiedStorage = draft.Config.Storage

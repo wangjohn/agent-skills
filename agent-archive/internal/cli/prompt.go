@@ -6,8 +6,10 @@ import (
 	"golang.org/x/term"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // prompter handles terminal and redirected input without echoing secrets.
@@ -107,8 +109,27 @@ func (p *prompter) intWithDefault(label string, def int) (int, error) {
 
 func (p *prompter) secret(label string) (string, error) {
 	if file, ok := p.source.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		fd := int(file.Fd())
+		state, err := term.GetState(fd)
+		if err != nil {
+			return "", fmt.Errorf("read terminal state: %w", err)
+		}
+		interrupts := make(chan os.Signal, 1)
+		signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+		done := make(chan struct{})
+		defer func() { signal.Stop(interrupts); close(done); _ = term.Restore(fd, state) }()
+		go func() {
+			select {
+			case sig := <-interrupts:
+				_ = term.Restore(fd, state)
+				// Exit only after restoring the caller's terminal. A signal
+				// must not be mistaken for consent or resume the wizard.
+				os.Exit(128 + int(sig.(syscall.Signal)))
+			case <-done:
+			}
+		}()
 		fmt.Fprint(p.out, label)
-		value, err := term.ReadPassword(int(file.Fd()))
+		value, err := term.ReadPassword(fd)
 		fmt.Fprintln(p.out)
 		if err != nil {
 			return "", fmt.Errorf("cannot hide credential input: %w", err)

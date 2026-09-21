@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +107,75 @@ func TestStatusReportsJournalWithoutConfiguration(t *testing.T) {
 	}
 	view, err := readStatus(testEnv(t, home, time.Now()))
 	if err != nil || view.State != "Setup needs recovery" || view.Code != "recovery_required" {
+		t.Fatalf("view=%+v err=%v", view, err)
+	}
+}
+
+type settingsProbeStore struct {
+	storage.ObjectStore
+	fail bool
+}
+
+func (s settingsProbeStore) Put(ctx context.Context, key string, value []byte) error {
+	if s.fail {
+		return errors.New("incorrect region or folder")
+	}
+	return s.ObjectStore.Put(ctx, key, value)
+}
+
+func TestFailedProbeAllowsRegionAndPrefixCorrection(t *testing.T) {
+	for _, choice := range []string{"region", "prefix"} {
+		t.Run(choice, func(t *testing.T) {
+			home := t.TempDir()
+			env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
+			attempts := 0
+			env.OpenStore = func(cfg config.Config) (storage.ObjectStore, error) {
+				attempts++
+				fixed := cfg.Storage.Region == "eu-west-1"
+				if choice == "prefix" {
+					fixed = cfg.Storage.Prefix == "allowed/"
+				}
+				return settingsProbeStore{storage.NewMemoryStore(), !fixed}, nil
+			}
+			value := "eu-west-1"
+			if choice == "prefix" {
+				value = "allowed/"
+			}
+			input := strings.TrimSuffix(s3SetupInput("bucket", "us-east-1", "profile", true, false, false, t.TempDir()), "y\n")
+			setupRun(t, env, input+"edit\n"+choice+"\n"+value+"\ny\n", 0)
+			if attempts != 2 {
+				t.Fatalf("attempts=%d", attempts)
+			}
+			cfg, found, err := config.Load(home)
+			if err != nil || !found {
+				t.Fatalf("saved=%v err=%v", found, err)
+			}
+			if choice == "region" && cfg.Storage.Region != value || choice == "prefix" && cfg.Storage.Prefix != value {
+				t.Fatal(cfg.Storage)
+			}
+		})
+	}
+}
+
+func TestStatusDetectsPartialHooks(t *testing.T) {
+	home, userHome := t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now())
+	setupRun(t, env, s3SetupInput("bucket", "us-east-1", "profile", true, false, false, t.TempDir()), 0)
+	path := filepath.Join(userHome, ".codex", "hooks.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	delete(root["hooks"].(map[string]any), "SessionStart")
+	if err := local.Write(path, root); err != nil {
+		t.Fatal(err)
+	}
+	view, err := readStatus(env)
+	if err != nil || view.State != "Needs attention" || view.Apps[0].Hooks == "installed" {
 		t.Fatalf("view=%+v err=%v", view, err)
 	}
 }

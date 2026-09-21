@@ -133,3 +133,30 @@ func TestPlanRemovalSkipsMissingAndUnrelatedFiles(t *testing.T) {
 		t.Fatal("planning a removal must not touch the file")
 	}
 }
+
+func TestInstalledChecksCommandsForEveryHarness(t *testing.T) {
+	for _, app := range []string{"codex", "claude", "cursor"} {
+		t.Run(app, func(t *testing.T) {
+			home := t.TempDir()
+			plan, err := Plan(home, "/Applications/agent-archive", []string{app})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			ok, err := Installed(home, "/Applications/agent-archive", app)
+			if err != nil || !ok {
+				t.Fatalf("installed=%v err=%v", ok, err)
+			}
+			wrong := strings.ReplaceAll(string(plan[0].After), " _hook --harness ", " wrong-command --harness ")
+			if err := os.WriteFile(plan[0].Path, []byte(wrong), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = Installed(home, "/Applications/agent-archive", app)
+			if err != nil || ok {
+				t.Fatalf("broken installed=%v err=%v", ok, err)
+			}
+		})
+	}
+}
