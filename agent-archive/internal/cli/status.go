@@ -171,7 +171,7 @@ func readStatus(env Env) (view statusView, err error) {
 			if app.State == "waiting for first session" {
 				app.State = "hook observed; waiting for capture"
 			}
-			bundle, at, state, found, err := store.LoadPublished(reg.ArchiveSessionID)
+			bundle, at, _, found, err := store.LoadPublished(reg.ArchiveSessionID)
 			if err != nil {
 				return view, err
 			}
@@ -185,7 +185,13 @@ func readStatus(env Env) (view statusView, err error) {
 			if found && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
-			if state == collector.CacheStatusPublished || (state == collector.CacheStatusRateLimited && !at.IsZero()) {
+			_, actualAt, published, e := store.LoadLastPublished(reg.ArchiveSessionID)
+			if e != nil {
+				return view, e
+			}
+			if published {
+				at = actualAt
+
 				app.Published = true
 				app.PublishedSessions++
 				app.State = "published; read-back pending"

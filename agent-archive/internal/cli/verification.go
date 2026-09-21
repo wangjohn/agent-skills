@@ -84,7 +84,7 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 		if !cfg.AcceptSession(reg) {
 			continue
 		}
-		bundle, at, _, _, err := store.LoadPublished(reg.ArchiveSessionID)
+		bundle, at, _, err := store.LoadLastPublished(reg.ArchiveSessionID)
 		if err != nil {
 			return err
 		}

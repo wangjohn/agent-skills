@@ -93,7 +93,10 @@ func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) err
 	}
 	paths := []string{
 		s.registrationPath(archiveSessionID),
+		s.requestPath(archiveSessionID),
 		s.publishedPath(archiveSessionID),
+		s.pendingPath(archiveSessionID),
+		filepath.Join(s.home, "pending-scans", archiveSessionID+".json"),
 		s.supersededPath(archiveSessionID),
 	}
 	if nativeSessionID != "" {
