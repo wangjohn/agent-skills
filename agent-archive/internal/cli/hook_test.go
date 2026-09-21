@@ -266,7 +266,7 @@ func TestHandleHookEventCapturesSupportedFinalTextAfterFiltering(t *testing.T) {
 			final = item
 		}
 	}
-	if text, _ := final.Payload["text"].(string); strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
+	if text, _ := final.Payload["text"].(string); final.Payload["redacted"] != true || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("final evidence was not filtered before persistence: %#v", final)
 	}
 }

@@ -86,7 +86,7 @@ func runFeedbackCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: feedback: create evidence identity: %v\n", err)
 		return 1
 	}
-	filtered, _, err := archive.FilterSupplementalEvidence([]archive.SupplementalEvidence{{
+	filtered, gaps, err := archive.FilterSupplementalEvidence([]archive.SupplementalEvidence{{
 		Kind: archive.EvidenceKindExplicitFeedback, ObservedAt: now,
 		Provenance: "user:agent-archive-feedback-file",
 		Payload:    map[string]any{"event_id": eventID, "text": string(content), "source": "user"},
@@ -98,6 +98,9 @@ func runFeedbackCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if len(filtered) != 1 {
 		fmt.Fprintln(stderr, "agent-archive: feedback: input contained no retainable text")
 		return 1
+	}
+	if len(gaps) > 0 {
+		filtered[0].Payload["redacted"] = true
 	}
 	if err := store.SaveRequest(sessionID, "explicit_feedback", now, filtered[0]); err != nil {
 		fmt.Fprintf(stderr, "agent-archive: feedback: save: %v\n", err)

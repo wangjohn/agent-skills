@@ -36,7 +36,7 @@ func TestFeedbackFileIsFilteredBeforeRequestPersistence(t *testing.T) {
 	}
 	evidence := requests[0].HookEvidence[0]
 	text, _ := evidence.Payload["text"].(string)
-	if evidence.Provenance != "user:agent-archive-feedback-file" || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
+	if evidence.Provenance != "user:agent-archive-feedback-file" || evidence.Payload["redacted"] != true || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("evidence=%#v", evidence)
 	}
 	encoded, err := json.Marshal(requests)

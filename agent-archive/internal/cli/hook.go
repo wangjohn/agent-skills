@@ -345,12 +345,15 @@ func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event 
 	candidate := archive.SupplementalEvidence{
 		Kind: kind, ObservedAt: now, Provenance: "hook:" + strings.ToLower(strings.TrimSpace(harness)) + ":" + strings.ToLower(event), Payload: hookPayload,
 	}
-	filtered, _, err := archive.FilterSupplementalEvidence([]archive.SupplementalEvidence{candidate})
+	filtered, gaps, err := archive.FilterSupplementalEvidence([]archive.SupplementalEvidence{candidate})
 	if err != nil {
 		return nil, fmt.Errorf("filter hook evidence: %w", err)
 	}
 	if len(filtered) == 0 {
 		return nil, nil
+	}
+	if len(gaps) > 0 {
+		filtered[0].Payload["redacted"] = true
 	}
 	return &filtered[0], nil
 }
