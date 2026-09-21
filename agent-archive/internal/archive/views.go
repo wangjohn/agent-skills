@@ -432,7 +432,11 @@ func deriveLifecycle(evidence []SupplementalEvidence) (MetadataState, TurnOutcom
 		case "stopfailure":
 			state, outcome = MetadataStateIdle, TurnOutcomeError
 		case "sessionend":
-			state, outcome = MetadataStateClosed, documentedLifecycleOutcome(observation.event, observation.status, observation.provenance)
+			state = MetadataStateClosed
+			// Closing the session does not undo a previously observed turn outcome.
+			if observed := documentedLifecycleOutcome(observation.event, observation.status, observation.provenance); observed != TurnOutcomeUnknown {
+				outcome = observed
+			}
 		case "subagentstop":
 			state, outcome = MetadataStateClosed, documentedLifecycleOutcome(observation.event, observation.status, observation.provenance)
 		}

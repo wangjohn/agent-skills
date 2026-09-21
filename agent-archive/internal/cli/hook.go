@@ -59,7 +59,7 @@ const (
 // classifyHookEvent mirrors, per harness, exactly the event names
 // hooks.Merge installs (see internal/hooks/hooks.go's events lists) and the
 // spec's Lifecycle integration table. Anything else installed alongside
-// these (UserPromptSubmit, beforeSubmitPrompt, PreToolUse, ...) is not an
+// these (PreToolUse, PostToolUse, ...) is not an
 // archive-relevant event and is ignored here.
 func classifyHookEvent(harness, eventName string) hookEventKind {
 	switch strings.ToLower(strings.TrimSpace(harness)) {
@@ -162,7 +162,7 @@ func handleSessionActivity(store *collector.LocalStore, harness, nativeSessionID
 	if err != nil {
 		return err
 	}
-	if !found || !strings.EqualFold(reg.Harness.Name, harness) {
+	if !found || canonicalHarness(reg.Harness.Name) != canonicalHarness(harness) {
 		return nil
 	}
 	return saveLifecycleEvidence(store, archiveID, harness, strings.ToLower(eventName), payload, now)
