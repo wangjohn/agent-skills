@@ -155,6 +155,7 @@ Manage capture
 Inspect history
   agent-archive list        Find archived sessions
   agent-archive show ID     Read a session's metadata
+  agent-archive feedback ID Add explicit feedback from a local file
 
 Maintenance
   agent-archive uninstall   Remove integrations; keep local data
@@ -212,6 +213,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int 
 		return runListCommand(args[1:], stdout, stderr, env)
 	case "show":
 		return runShowCommand(args[1:], stdout, stderr, env)
+	case "feedback":
+		return runFeedbackCommand(args[1:], stdout, stderr, env)
 	default:
 		fmt.Fprintf(stderr, "agent-archive: unknown command %q\n\n%s", args[0], usage)
 		return 2

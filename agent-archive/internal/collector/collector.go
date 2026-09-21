@@ -217,18 +217,11 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("load last published bundle: %w", err)
 	}
-	var observed []archive.SupplementalEvidence
-	if opts.SupplementalEvidence != nil {
-		observed, err = opts.SupplementalEvidence(reg, now)
-		if err != nil {
-			return outcomeSkipped, fmt.Errorf("collect supplemental evidence: %w", err)
-		}
-	}
 	baseEvidence := lastPublished.SupplementalEvidence
 	if havePrev {
 		baseEvidence = prevBundle.SupplementalEvidence
 	}
-	supplemental := mergeSupplementalEvidence(baseEvidence, observed, req.HookEvidence)
+	supplemental := mergeSupplementalEvidence(baseEvidence, req.HookEvidence)
 
 	// now is a placeholder here; bundleEvidenceEqual ignores CapturedAt, so
 	// it has no effect on the comparison below. The real value is assigned
@@ -236,6 +229,20 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	candidate, err := archive.NewSourceBundle(reg, adapter, filtered, now, supplemental)
 	if err != nil {
 		return outcomeSkipped, fmt.Errorf("build source bundle: %w", err)
+	}
+
+	// Observe the filesystem only with session activity. An unrelated skill edit
+	// must not refresh every historical session or extend its retention lifetime.
+	if opts.SupplementalEvidence != nil && (!havePrev || req.Token != "" || !nativeEvidenceExtends(prevBundle, candidate) || !nativeEvidenceExtends(candidate, prevBundle)) {
+		observed, err := opts.SupplementalEvidence(reg, now)
+		if err != nil {
+			return outcomeSkipped, fmt.Errorf("collect supplemental evidence: %w", err)
+		}
+		supplemental = mergeSupplementalEvidence(baseEvidence, observed, req.HookEvidence)
+		candidate, err = archive.NewSourceBundle(reg, adapter, filtered, now, supplemental)
+		if err != nil {
+			return outcomeSkipped, fmt.Errorf("build observed source bundle: %w", err)
+		}
 	}
 
 	changedFromCache := true
@@ -497,26 +504,9 @@ func nativeEvidenceExtends(previous, candidate archive.SourceBundle) bool {
 }
 
 func mergeSupplementalEvidence(existing []archive.SupplementalEvidence, groups ...[]archive.SupplementalEvidence) []archive.SupplementalEvidence {
-	out := append([]archive.SupplementalEvidence(nil), existing...)
+	out := existing
 	for _, additions := range groups {
-		for _, evidence := range additions {
-			duplicate := false
-			for _, old := range out {
-				if old.Kind == evidence.Kind && old.Provenance == evidence.Provenance && supplementalPayloadEqual(old, evidence) && (old.ObservedAt.Equal(evidence.ObservedAt) || evidence.Kind == archive.EvidenceKindSkillInventory || evidence.Kind == archive.EvidenceKindSkillSnapshot) {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
-				out = append(out, evidence)
-			}
-		}
+		out = archive.MergeSupplementalEvidence(out, additions)
 	}
 	return out
-}
-
-func supplementalPayloadEqual(a, b archive.SupplementalEvidence) bool {
-	aBytes, errA := json.Marshal(a.Payload)
-	bBytes, errB := json.Marshal(b.Payload)
-	return errA == nil && errB == nil && bytes.Equal(aBytes, bBytes)
 }

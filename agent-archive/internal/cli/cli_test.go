@@ -13,9 +13,11 @@ import (
 
 func testEnv(t *testing.T, home string, now time.Time) Env {
 	t.Helper()
+	userHome := t.TempDir()
 	return Env{
-		Home: func() (string, error) { return home, nil },
-		Now:  func() time.Time { return now },
+		UserHomeDir: func() (string, error) { return userHome, nil },
+		Home:        func() (string, error) { return home, nil },
+		Now:         func() time.Time { return now },
 		OpenStore: func(config.Config) (storage.ObjectStore, error) {
 			return storage.NewMemoryStore(), nil
 		},

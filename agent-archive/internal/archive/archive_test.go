@@ -389,6 +389,81 @@ func TestSameNameDifferentHashInventoryMetadataIsDeterministic(t *testing.T) {
 	if !bytes.Equal(x, y) || one.SkillsAvailable[0].SHA256 != "aaa" {
 		t.Fatalf("%s %s", x, y)
 	}
+	if one.SkillDetection != SkillDetectionUnavailable {
+		t.Fatalf("installed-only inventory must leave use detection unknown, got %q", one.SkillDetection)
+	}
+}
+
+func TestMergeSupplementalEvidenceRetainsChangedInventoryHistory(t *testing.T) {
+	first := time.Date(2026, 9, 20, 1, 0, 0, 0, time.UTC)
+	later := first.Add(time.Hour)
+	payload := map[string]any{"coverage": "installed_only", "scope": "user", "skills": []any{map[string]any{"name": "review", "sha256": "abc"}}}
+	previous := []SupplementalEvidence{{Kind: EvidenceKindSkillInventory, ObservedAt: first, Provenance: "filesystem:codex", Payload: payload}}
+	fresh := []SupplementalEvidence{{Kind: EvidenceKindSkillInventory, ObservedAt: later, Provenance: "filesystem:codex", Payload: payload}}
+	merged := MergeSupplementalEvidence(previous, fresh)
+	if len(merged) != 1 || !merged[0].ObservedAt.Equal(first) {
+		t.Fatalf("merged=%#v", merged)
+	}
+	fresh[0].Payload = map[string]any{"coverage": "installed_only", "scope": "user", "skills": []any{map[string]any{"name": "review", "sha256": "def"}}}
+	merged = MergeSupplementalEvidence(previous, fresh)
+	if len(merged) != 2 || !merged[1].ObservedAt.Equal(later) || firstString(merged[0].Payload["skills"].([]any)[0].(map[string]any), "sha256") != "abc" || firstString(merged[1].Payload["skills"].([]any)[0].(map[string]any), "sha256") != "def" {
+		t.Fatalf("changed merged=%#v", merged)
+	}
+	back := previous[0]
+	back.ObservedAt = later.Add(time.Hour)
+	merged = MergeSupplementalEvidence(merged, []SupplementalEvidence{back})
+	if len(merged) != 3 || !merged[2].ObservedAt.Equal(back.ObservedAt) {
+		t.Fatalf("changed-back merged=%#v", merged)
+	}
+}
+
+func TestDeriveSkillsKeepsInventoryHistoryWithoutClaimingUse(t *testing.T) {
+	now := time.Date(2026, 9, 20, 1, 0, 0, 0, time.UTC)
+	bundle := SourceBundle{
+		SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p",
+		Capture: SourceCapture{Harness: Harness{Name: "codex"}, AdapterName: "codex", AdapterVersion: "1", SourceFormat: "jsonl", FilterVersion: FilterVersion, CapturedAt: now},
+		SupplementalEvidence: []SupplementalEvidence{
+			{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project_agents", "root_status": "present", "skills": []any{map[string]any{"name": "review", "sha256": "old"}}}},
+			{Kind: EvidenceKindSkillInventory, ObservedAt: now.Add(time.Hour), Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project_agents", "root_status": "absent", "skills": []any{}}},
+		},
+	}
+	metadata, err := BuildMetadata(bundle, "machine", now, now.Add(2*time.Hour), SourceReference{Key: "sessions/codex/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.SkillsAvailable) != 1 || metadata.SkillsAvailable[0].Name != "review" || len(metadata.SkillsUsed) != 0 || metadata.SkillDetection != SkillDetectionUnavailable {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
+func TestMergeSupplementalEvidenceDeduplicatesRetriesButKeepsIntentionalFeedback(t *testing.T) {
+	now := time.Now().UTC()
+	retried := SupplementalEvidence{Kind: EvidenceKindFinalResponse, ObservedAt: now, Provenance: "hook:codex:stop", Payload: map[string]any{"turn_id": "t1", "text": "done"}}
+	one := SupplementalEvidence{Kind: EvidenceKindExplicitFeedback, ObservedAt: now, Provenance: "user:agent-archive-feedback-file", Payload: map[string]any{"event_id": "one", "text": "same"}}
+	two := SupplementalEvidence{Kind: EvidenceKindExplicitFeedback, ObservedAt: now, Provenance: "user:agent-archive-feedback-file", Payload: map[string]any{"event_id": "two", "text": "same"}}
+	merged := MergeSupplementalEvidence([]SupplementalEvidence{retried, one}, []SupplementalEvidence{retried, two})
+	if len(merged) != 3 {
+		t.Fatalf("merged=%#v", merged)
+	}
+}
+
+func TestMergeSupplementalEvidenceRetainsHistoricalSkillVersions(t *testing.T) {
+	now := time.Now().UTC()
+	previous := []SupplementalEvidence{
+		{Kind: EvidenceKindSkillInventory, ObservedAt: now, Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project", "skills": []any{map[string]any{"name": "old"}}}},
+		{Kind: EvidenceKindSkillSnapshot, ObservedAt: now, Provenance: "filesystem:codex", Payload: map[string]any{"name": "old", "scope": "project", "snapshot": "old"}},
+	}
+	fresh := []SupplementalEvidence{
+		{Kind: EvidenceKindSkillInventory, ObservedAt: now.Add(time.Minute), Provenance: "filesystem:codex", Payload: map[string]any{"coverage": "installed_only", "scope": "project", "skills": []any{map[string]any{"name": "old", "sha256": "new-hash"}}}},
+		{Kind: EvidenceKindSkillSnapshot, ObservedAt: now.Add(time.Minute), Provenance: "filesystem:codex", Payload: map[string]any{"name": "old", "scope": "project", "sha256": "new-hash", "snapshot": "new"}},
+	}
+	merged := MergeSupplementalEvidence(previous, fresh)
+	if len(merged) != 4 || firstString(merged[1].Payload, "snapshot") != "old" || firstString(merged[3].Payload, "snapshot") != "new" {
+		t.Fatalf("merged=%#v", merged)
+	}
+	if repeated := MergeSupplementalEvidence(merged, fresh[1:]); len(repeated) != len(merged) {
+		t.Fatalf("identical historical snapshot repeated: %#v", repeated)
+	}
 }
 
 func TestClaudeMultipleToolUseEntriesHaveResponseAttribution(t *testing.T) {

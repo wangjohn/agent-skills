@@ -116,6 +116,76 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 	return out, gaps, nil
 }
 
+// MergeSupplementalEvidence combines observations without allowing the time
+// of a repeated background scan to manufacture a new source snapshot.
+// Inventories form a history: a changed inventory is appended with its actual
+// observation time, while an unchanged latest inventory is omitted. Skill
+// snapshots retain every distinct filtered/original-hash version but do not
+// repeat identical bytes. Other evidence is event-shaped and remains
+// append-only, with exact retry duplicates removed.
+func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []SupplementalEvidence {
+	out := append([]SupplementalEvidence(nil), previous...)
+	for _, candidate := range fresh {
+		switch candidate.Kind {
+		case EvidenceKindSkillInventory:
+			identity := supplementalIdentity(candidate)
+			unchanged := false
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Kind == EvidenceKindSkillInventory && supplementalIdentity(out[i]) == identity {
+					unchanged = supplementalPayloadEqual(out[i].Payload, candidate.Payload)
+					break
+				}
+			}
+			if !unchanged {
+				out = append(out, candidate)
+			}
+		case EvidenceKindSkillSnapshot:
+			duplicate := false
+			for _, existing := range out {
+				if existing.Kind == EvidenceKindSkillSnapshot && supplementalIdentity(existing) == supplementalIdentity(candidate) && supplementalPayloadEqual(existing.Payload, candidate.Payload) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+		default:
+			duplicate := false
+			for _, existing := range out {
+				if supplementalEvidenceEqual(existing, candidate) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+		}
+	}
+	return out
+}
+
+func supplementalEvidenceEqual(a, b SupplementalEvidence) bool {
+	return a.Kind == b.Kind && a.Provenance == b.Provenance && a.ObservedAt.Equal(b.ObservedAt) && supplementalPayloadEqual(a.Payload, b.Payload)
+}
+
+func supplementalIdentity(e SupplementalEvidence) string {
+	identity := string(e.Kind) + "\x00" + e.Provenance
+	if e.Kind == EvidenceKindSkillSnapshot {
+		identity += "\x00" + firstString(e.Payload, "name") + "\x00" + firstString(e.Payload, "scope")
+	} else {
+		identity += "\x00" + firstString(e.Payload, "coverage") + "\x00" + firstString(e.Payload, "scope")
+	}
+	return identity
+}
+
+func supplementalPayloadEqual(a, b map[string]any) bool {
+	aJSON, aErr := json.Marshal(a)
+	bJSON, bErr := json.Marshal(b)
+	return aErr == nil && bErr == nil && bytes.Equal(aJSON, bJSON)
+}
+
 // BuildCompressedSource serializes a bundle canonically and uses gzip headers
 // that are independent of the wall clock and host platform.
 func BuildCompressedSource(bundle SourceBundle) (CompressedSource, error) {
