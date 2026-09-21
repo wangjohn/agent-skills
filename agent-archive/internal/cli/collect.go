@@ -7,9 +7,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/evidence"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/retention"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
@@ -104,10 +106,11 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		return collector.Result{}, storeErr
 	}
 	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
-		MachineID:       cfg.MachineID,
-		AcceptSession:   cfg.AcceptSession,
-		Now:             env.Now,
-		RequireSkillUse: cfg.RequireSkillUse,
+		MachineID:            cfg.MachineID,
+		SupplementalEvidence: skillObserver(env),
+		AcceptSession:        cfg.AcceptSession,
+		Now:                  env.Now,
+		RequireSkillUse:      cfg.RequireSkillUse,
 	})
 	if err != nil {
 		return result, err
@@ -172,4 +175,25 @@ func openConfiguredStore(cfg config.Config) (storage.ObjectStore, error) {
 		return nil, fmt.Errorf("keychain unavailable: %w", keychainErr)
 	}
 	return storage.NewConfiguredStore(context.Background(), cfg.Storage, keychain)
+}
+
+// Share one bounded observation per harness/project within a pass.
+func skillObserver(env Env) func(archive.SessionRegistration, time.Time) ([]archive.SupplementalEvidence, error) {
+	cache := map[string][]archive.SupplementalEvidence{}
+	return func(reg archive.SessionRegistration, at time.Time) ([]archive.SupplementalEvidence, error) {
+		key := reg.Harness.Name + "\x00" + reg.ProjectRoot
+		if prior, ok := cache[key]; ok {
+			return prior, nil
+		}
+		userHome, err := env.userHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		observed, err := evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, ProjectRoot: reg.ProjectRoot, UserHome: userHome, ObservedAt: at})
+		if err != nil {
+			return nil, err
+		}
+		cache[key] = observed
+		return observed, nil
+	}
 }
