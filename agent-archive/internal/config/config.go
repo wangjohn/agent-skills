@@ -13,6 +13,7 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 // SchemaVersion is bumped only when Config's on-disk shape changes
@@ -23,10 +24,11 @@ const SchemaVersion = 1
 // secrets: R2 secrets live in Keychain (see credentials.Config.R2CredentialRef)
 // and S3 credentials are resolved through the named AWS profile.
 type Config struct {
-	RetiredCredentialRefs []string             `json:"retired_credential_refs,omitempty"`
-	StorageVerifiedAt     time.Time            `json:"storage_verified_at,omitempty"`
-	DestinationSince      time.Time            `json:"destination_since,omitempty"`
-	PreviousDestinations  []credentials.Config `json:"previous_destinations,omitempty"`
+	BucketPrivacy         *storage.PrivacyReport `json:"bucket_privacy,omitempty"`
+	RetiredCredentialRefs []string               `json:"retired_credential_refs,omitempty"`
+	StorageVerifiedAt     time.Time              `json:"storage_verified_at,omitempty"`
+	DestinationSince      time.Time              `json:"destination_since,omitempty"`
+	PreviousDestinations  []credentials.Config   `json:"previous_destinations,omitempty"`
 
 	SchemaVersion int                `json:"schema_version"`
 	MachineID     string             `json:"machine_id"`

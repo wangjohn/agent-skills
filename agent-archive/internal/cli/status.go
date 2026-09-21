@@ -13,6 +13,7 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 type appStatus struct {
@@ -62,8 +63,9 @@ type projectCaptureStatus struct {
 	VerifiedAt        time.Time `json:"verified_at,omitempty"`
 }
 type statusView struct {
-	ConfigurationID string        `json:"configuration_id,omitempty"`
-	Authentication  storageHealth `json:"authentication"`
+	PrivacyEvidence storage.PrivacyReport `json:"privacy_evidence"`
+	ConfigurationID string                `json:"configuration_id,omitempty"`
+	Authentication  storageHealth         `json:"authentication"`
 
 	Code               string              `json:"code"`
 	Version            int                 `json:"schema_version"`
@@ -97,7 +99,8 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	fmt.Fprintf(stdout, "Agent Archive — %s\n\n", view.State)
 	if view.Storage != "" {
-		fmt.Fprintf(stdout, "Storage:       %s\nAccess checked: %s (privacy not verified)\n", view.Storage, formatTimeOrNever(view.StorageVerifiedAt))
+		fmt.Fprintf(stdout, "Storage:       %s\nAccess checked: %s\n", view.Storage, formatTimeOrNever(view.StorageVerifiedAt))
+		printBucketPrivacy(stdout, view.PrivacyEvidence)
 	}
 	fmt.Fprintf(stdout, "Authentication: %s (checked %s; %s)\n", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt), view.Authentication.Context)
 	fmt.Fprintf(stdout, "Background:    %s\n", view.Background)
@@ -169,6 +172,8 @@ func readStatus(env Env) (view statusView, err error) {
 	}
 	view.Storage = fmt.Sprintf("%s / %s / %s", cfg.Storage.Provider, cfg.Storage.Bucket, cfg.Storage.Prefix)
 	view.StorageVerifiedAt = cfg.StorageVerifiedAt
+	view.PrivacyEvidence = currentBucketPrivacy(cfg, env.now())
+	view.Privacy = view.PrivacyEvidence.State
 	view.ConfigurationID = configurationID(cfg)
 	view.CaptureDiagnostics, err = readCaptureDiagnostics(home)
 	if err != nil {
