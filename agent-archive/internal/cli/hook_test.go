@@ -306,10 +306,18 @@ func TestHandleHookEventCapturesSupportedFinalTextAfterFiltering(t *testing.T) {
 	}
 }
 
-func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
+func TestAcceptedCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	store, _ := collector.NewLocalStore(home)
+	archiveID, _, err := store.EnsureArchiveSessionID("native-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveRegistration(archive.SessionRegistration{ArchiveSessionID: archiveID, NativeSessionID: "native-1", ProjectID: "synthetic-project", ProjectRoot: "/work/widget", Harness: archive.Harness{Name: "cursor"}, SessionStartedAt: now, RegisteredAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	start := map[string]any{"hook_event_name": "sessionStart", "conversation_id": "native-1", "workspace_roots": []any{"/work/widget"}, "cursor_version": "1.7.2", "composer_mode": "agent", "model": "label", "model_id": "model-x", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}
 	if err := handleHookEvent(home, "cursor", start, now); err != nil {
 		t.Fatal(err)
@@ -318,7 +326,6 @@ func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T)
 	if err := handleHookEvent(home, "cursor", response, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	store, _ := collector.NewLocalStore(home)
 	regs, _ := store.LoadRegistrations()
 	if len(regs) != 1 || regs[0].Harness.Version != "1.7.2" || regs[0].Harness.Mode != "agent" {
 		t.Fatalf("registration=%#v", regs)

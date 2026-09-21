@@ -172,7 +172,12 @@ func handleSessionStart(home string, store *collector.LocalStore, cfg config.Con
 			if !cfg.AcceptSession(existing) {
 				return nil
 			}
-			existing.TranscriptPath = transcriptPath
+			if canonicalHarness(existing.Harness.Name) != canonicalHarness(harness) || (root != "" && root != existing.ProjectRoot) {
+				return fmt.Errorf("session identity conflicts with the accepted registration")
+			}
+			if transcriptPath != "" {
+				existing.TranscriptPath = transcriptPath
+			}
 			existing.RegisteredAt = now
 			applyHarnessObservation(&existing.Harness, harness, payload)
 			if err := store.SaveRegistration(existing); err != nil {
@@ -182,12 +187,20 @@ func handleSessionStart(home string, store *collector.LocalStore, cfg config.Con
 		}
 	}
 
-	// A hook receipt time is not a native session start time. Require a
-	// documented fresh-start signal before creating a new registration.
-	// Codex and Claude Code expose source=startup|clear. Cursor documents
-	// sessionStart as creation of a new composer, but older/unversioned payloads
-	// were observed without enough provenance, so require its documented
-	// cursor_version field as part of that signal.
+	// Ignore excluded projects without persisting their paths in diagnostics.
+	included := false
+	for _, project := range cfg.Archive.Projects {
+		if project.Included && filepath.Clean(project.Root) == filepath.Clean(root) {
+			included = true
+			break
+		}
+	}
+	if !included {
+		return nil
+	}
+	// Codex and Claude document an explicit fresh-start source. Cursor's
+	// version field does not prove that an unknown session began after
+	// activation; until native start provenance is verified, leave it out.
 	if !provesFreshSessionStart(harness, payload) {
 		return recordCaptureDiagnostic(home, captureDiagnostic{
 			Code: diagnosticUnknownSessionStart, Harness: canonicalHarness(harness),
@@ -241,8 +254,7 @@ func provesFreshSessionStart(harness string, payload map[string]any) bool {
 		case "startup", "clear":
 			return true
 		}
-	case "cursor":
-		return firstNonEmptyString(payload, "cursor_version") != ""
+
 	}
 	return false
 }

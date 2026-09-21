@@ -61,3 +61,14 @@ func recordCaptureDiagnostic(home string, diagnostic captureDiagnostic) error {
 	}
 	return local.Write(captureDiagnosticsPath(home), kept)
 }
+
+func captureDiagnosticMessage(code string) string {
+	switch code {
+	case diagnosticUnknownSessionStart:
+		return "the session start could not be established"
+	case diagnosticPreActivationStart:
+		return "the session start does not meet the project activation boundary"
+	default:
+		return "capture evidence was not accepted"
+	}
+}
