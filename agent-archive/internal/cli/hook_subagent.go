@@ -22,7 +22,7 @@ func handleSubagentStop(store *collector.LocalStore, cfg config.Config, harness,
 	if err != nil {
 		return err
 	}
-	if !found || !strings.EqualFold(parent.Harness.Name, harness) || !cfg.AcceptSession(parent) {
+	if !found || canonicalHarness(parent.Harness.Name) != canonicalHarness(harness) || !cfg.AcceptSession(parent) {
 		return nil
 	}
 

@@ -114,6 +114,10 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		if err := local.SetScanPending(reg.ArchiveSessionID, true); err != nil {
 			return result, fmt.Errorf("journal pending scan: %w", err)
 		}
+		if err := markPublishedSubagent(local, reg); err != nil {
+			result.Errors[reg.ArchiveSessionID] = err
+			pending++
+		}
 		outcome, err := processSession(ctx, local, store, reg, req, now, opts)
 		if err != nil {
 			result.Errors[reg.ArchiveSessionID] = err
@@ -138,7 +142,7 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		switch outcome {
 		case outcomePublished:
 			result.Published = append(result.Published, reg.ArchiveSessionID)
-			if err := markPublishedSubagent(local, reg, now); err != nil {
+			if err := markPublishedSubagent(local, reg); err != nil {
 				result.Errors[reg.ArchiveSessionID] = err
 				pending++
 			}

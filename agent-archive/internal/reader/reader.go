@@ -224,7 +224,7 @@ func LoadSource(ctx context.Context, store storage.ObjectStore, metadata archive
 	if err := json.Unmarshal(plain, &bundle); err != nil {
 		return archive.SourceBundle{}, fmt.Errorf("decode source: %w", err)
 	}
-	if bundle.SchemaVersion != archive.SourceSchemaVersion || bundle.ArchiveSessionID != metadata.SessionID || bundle.NativeSessionID != metadata.NativeSessionID || bundle.ProjectID != metadata.ProjectID || bundle.Capture.Harness != metadata.Harness || !bundle.Capture.CapturedAt.Equal(metadata.CapturedAt) || bundle.Capture.FilterVersion != metadata.FilterVersion {
+	if bundle.SchemaVersion != archive.SourceSchemaVersion || bundle.ArchiveSessionID != metadata.SessionID || bundle.NativeSessionID != metadata.NativeSessionID || bundle.ProjectID != metadata.ProjectID || bundle.ParentSessionID != metadata.ParentSessionID || bundle.Capture.Harness != metadata.Harness || !bundle.Capture.CapturedAt.Equal(metadata.CapturedAt) || bundle.Capture.FilterVersion != metadata.FilterVersion {
 		return archive.SourceBundle{}, errors.New("source identity does not match metadata")
 	}
 	key, err := archive.SourceObjectKey(bundle, metadata.SourceBundle.SHA256)

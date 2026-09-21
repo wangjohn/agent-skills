@@ -3,8 +3,8 @@ package collector
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 )
@@ -45,7 +45,13 @@ func materializeSubagentCandidate(local *LocalStore, candidate SubagentCandidate
 	}
 	filtered, err := filterTranscript(adapter, reg)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("subagent transcript is not available yet: %w", err)
+		}
 		return rejectSubagentCandidate(local, candidate, "subagent_transcript_unavailable")
+	}
+	if filtered.NativeStartAt.IsZero() && len(filtered.Records) == 0 {
+		return errors.New("subagent transcript is empty; waiting for native records")
 	}
 	reg.SessionStartedAt = filtered.NativeStartAt
 	if err := validateSubagentTranscript(reg, filtered); err != nil {
@@ -56,7 +62,7 @@ func materializeSubagentCandidate(local *LocalStore, candidate SubagentCandidate
 	}
 	if existing, found, err := local.LoadRegistration(reg.ArchiveSessionID); err != nil {
 		return err
-	} else if found && (existing.ParentSessionID != reg.ParentSessionID || existing.ParentNativeSessionID != reg.ParentNativeSessionID || existing.ProjectID != reg.ProjectID || existing.ProjectRoot != reg.ProjectRoot || !strings.EqualFold(existing.Harness.Name, reg.Harness.Name) || existing.SubagentID != reg.SubagentID) {
+	} else if found && (existing.ParentSessionID != reg.ParentSessionID || existing.ParentNativeSessionID != reg.ParentNativeSessionID || existing.ProjectID != reg.ProjectID || existing.ProjectRoot != reg.ProjectRoot || !strings.EqualFold(existing.Harness.Name, reg.Harness.Name) || existing.SubagentID != reg.SubagentID || existing.TranscriptPath != reg.TranscriptPath || !existing.SessionStartedAt.Equal(reg.SessionStartedAt)) {
 		return rejectSubagentCandidate(local, candidate, "subagent_registration_conflict")
 	}
 	if err := local.SaveRegistration(reg); err != nil {
@@ -75,7 +81,7 @@ func materializeSubagentCandidate(local *LocalStore, candidate SubagentCandidate
 			return err
 		}
 	}
-	return local.RemoveSubagentCandidate(candidate.ArchiveSessionID)
+	return local.acknowledgeSubagentCandidate(candidate)
 }
 
 // validateSubagentTranscript is called before registration and on every later
@@ -86,6 +92,12 @@ func validateSubagentTranscript(reg archive.SessionRegistration, filtered archiv
 	}
 	if !filtered.NativeStartComplete || filtered.NativeStartAt.IsZero() || filtered.NativeEndAt.IsZero() || reg.SubagentObservedAt.IsZero() || filtered.NativeEndAt.After(reg.SubagentObservedAt) {
 		return errors.New("subagent transcript has incomplete native timestamp provenance")
+	}
+	if !filtered.NativeStartAt.Equal(reg.SessionStartedAt) {
+		return errors.New("subagent native start changed after registration")
+	}
+	if len(filtered.AgentIDs) == 0 {
+		return errors.New("subagent transcript has no child agent identity")
 	}
 	if len(filtered.SessionIDs) == 0 {
 		return errors.New("subagent transcript has no parent session identity")
@@ -111,19 +123,39 @@ func rejectSubagentCandidate(local *LocalStore, candidate SubagentCandidate, cod
 	if err := local.SaveRequest(candidate.ParentArchiveSessionID, code, candidate.ObservedAt, evidence); err != nil {
 		return err
 	}
-	if err := local.RemoveSubagentCandidate(candidate.ArchiveSessionID); err != nil {
+	if err := local.acknowledgeSubagentCandidate(candidate); err != nil {
 		return err
 	}
 	return fmt.Errorf("%s", code)
 }
 
-func markPublishedSubagent(local *LocalStore, reg archive.SessionRegistration, observedAt time.Time) error {
+// Retry link notification from durable publication state even when the child
+// has no new content or its live transcript has gone away.
+func markPublishedSubagent(local *LocalStore, reg archive.SessionRegistration) error {
 	if reg.ParentSessionID == "" {
 		return nil
 	}
-	evidence, err := archive.NewLinkedSessionEvidence(reg.ArchiveSessionID, archive.LinkedSessionPublished, observedAt)
+	_, publishedAt, published, err := local.LoadLastPublished(reg.ArchiveSessionID)
+	if err != nil || !published {
+		return err
+	}
+	if _, found, err := local.LoadRegistration(reg.ParentSessionID); err != nil || !found {
+		return err
+	}
+	parent, _, _, found, err := local.LoadPublished(reg.ParentSessionID)
 	if err != nil {
 		return err
 	}
-	return local.SaveRequest(reg.ParentSessionID, "subagent-published", observedAt, evidence)
+	if found {
+		for _, link := range parent.LinkedSessions {
+			if link.SessionID == reg.ArchiveSessionID && link.Status == archive.LinkedSessionPublished {
+				return nil
+			}
+		}
+	}
+	evidence, err := archive.NewLinkedSessionEvidence(reg.ArchiveSessionID, archive.LinkedSessionPublished, publishedAt)
+	if err != nil {
+		return err
+	}
+	return local.SaveRequest(reg.ParentSessionID, "subagent-published", publishedAt, evidence)
 }

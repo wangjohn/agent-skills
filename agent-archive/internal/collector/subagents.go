@@ -38,13 +38,18 @@ func (s *LocalStore) SaveSubagentCandidate(candidate SubagentCandidate) error {
 	if !safeFileComponent(candidate.ArchiveSessionID) || candidate.NativeSessionID == "" || candidate.ParentArchiveSessionID == "" || candidate.ParentNativeSessionID == "" || candidate.ProjectID == "" || candidate.ProjectRoot == "" || candidate.Harness.Name == "" || candidate.AgentID == "" || candidate.TranscriptPath == "" || candidate.ObservedAt.IsZero() {
 		return errors.New("subagent candidate is incomplete")
 	}
+	unlock, err := s.lockSubagentCandidate(candidate.ArchiveSessionID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	path := s.subagentCandidatePath(candidate.ArchiveSessionID)
 	var prior SubagentCandidate
 	if err := local.Read(path, &prior); err == nil {
 		if prior.NativeSessionID != candidate.NativeSessionID || prior.ParentArchiveSessionID != candidate.ParentArchiveSessionID || prior.ParentNativeSessionID != candidate.ParentNativeSessionID || prior.ProjectID != candidate.ProjectID || prior.ProjectRoot != candidate.ProjectRoot || !strings.EqualFold(prior.Harness.Name, candidate.Harness.Name) || prior.AgentID != candidate.AgentID || prior.TranscriptPath != candidate.TranscriptPath {
 			return errors.New("subagent candidate ownership changed")
 		}
-		if prior.ObservedAt.Before(candidate.ObservedAt) {
+		if prior.ObservedAt.After(candidate.ObservedAt) {
 			candidate.ObservedAt = prior.ObservedAt
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -77,10 +82,44 @@ func (s *LocalStore) LoadSubagentCandidates() ([]SubagentCandidate, error) {
 	return out, nil
 }
 
-func (s *LocalStore) RemoveSubagentCandidate(id string) error {
+func (s *LocalStore) lockSubagentCandidate(id string) (func(), error) {
 	if !safeFileComponent(id) {
-		return errors.New("invalid subagent candidate ID")
+		return nil, errors.New("invalid subagent candidate ID")
 	}
+	return local.NamedLockWait(s.home, filepath.Join("request-locks", "subagent-"+id+".lock"), time.Second)
+}
+
+func (s *LocalStore) RemoveSubagentCandidate(id string) error {
+	unlock, err := s.lockSubagentCandidate(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.removeSubagentCandidate(id)
+}
+
+// A later stop may arrive while background transcript validation is running.
+// Acknowledge only the exact observed generation, under the writer's short lock.
+func (s *LocalStore) acknowledgeSubagentCandidate(expected SubagentCandidate) error {
+	unlock, err := s.lockSubagentCandidate(expected.ArchiveSessionID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	var current SubagentCandidate
+	if err := local.Read(s.subagentCandidatePath(expected.ArchiveSessionID), &current); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !current.ObservedAt.Equal(expected.ObservedAt) || current.TranscriptPath != expected.TranscriptPath || current.NativeSessionID != expected.NativeSessionID || current.ParentArchiveSessionID != expected.ParentArchiveSessionID {
+		return nil
+	}
+	return s.removeSubagentCandidate(expected.ArchiveSessionID)
+}
+
+func (s *LocalStore) removeSubagentCandidate(id string) error {
 	err := os.Remove(s.subagentCandidatePath(id))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove subagent candidate: %w", err)

@@ -195,7 +195,7 @@ func runShowCommand(args []string, stdout, stderr io.Writer, env Env) int {
 			fmt.Fprintf(stderr, "agent-archive: show: %v\n", err)
 			return 1
 		}
-		return printJSON(stdout, stderr, metadata)
+		return printJSON(stdout, stderr, metadataWithLinks(ctx, store, metadata))
 	}
 
 	metadata, bundle, err := reader.RefreshAndLoad(ctx, store, key, reader.Limits{})
@@ -212,10 +212,19 @@ func runShowCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: show: normalized view unavailable: %v\n", err)
 		return 1
 	}
-	if code := printJSON(stdout, stderr, metadata); code != 0 {
+	if code := printJSON(stdout, stderr, metadataWithLinks(ctx, store, metadata)); code != 0 {
 		return code
 	}
 	return printJSON(stdout, stderr, normalizedOutput{Turns: view.Turns, ToolCalls: view.ToolCalls, HookFinals: view.HookFinals})
+}
+
+// Preserve the sidecar fields while exposing live link availability separately.
+// The recorded link status is historical; retention can remove a child later.
+func metadataWithLinks(ctx context.Context, store storage.ObjectStore, metadata archive.Metadata) any {
+	return struct {
+		archive.Metadata
+		LinkedAvailability []reader.LinkedAvailability `json:"linked_session_availability,omitempty"`
+	}{metadata, reader.ResolveLinkedSessions(ctx, store, metadata)}
 }
 
 // normalizedOutput is the JSON shape `show --normalized` prints for
