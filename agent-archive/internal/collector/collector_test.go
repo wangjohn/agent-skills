@@ -511,6 +511,37 @@ func TestStableSupplementalObservationDoesNotRepublish(t *testing.T) {
 	}
 }
 
+func TestChangedSupplementalInventoryPreservesEarlierObservation(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	first := archive.SupplementalEvidence{Kind: archive.EvidenceKindSkillInventory, ObservedAt: t0, Provenance: "filesystem", Payload: map[string]any{"coverage": "installed_only", "skills": []any{map[string]any{"name": "one"}}}}
+	second := archive.SupplementalEvidence{Kind: archive.EvidenceKindSkillInventory, ObservedAt: t0.Add(time.Hour), Provenance: "filesystem", Payload: map[string]any{"coverage": "installed_only", "skills": []any{map[string]any{"name": "two"}}}}
+	merged := mergeSupplementalEvidence([]archive.SupplementalEvidence{first}, []archive.SupplementalEvidence{second})
+	if len(merged) != 2 || !merged[0].ObservedAt.Equal(t0) {
+		t.Fatalf("inventory history was not preserved: %#v", merged)
+	}
+}
+
+func TestRunUpgradesAndCompletesLegacyTokenlessRequest(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	store := newTestStore(t)
+	if err := store.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := local.Write(store.requestPath("session-1"), Request{ArchiveSessionID: "session-1", Reasons: []string{"stop"}, RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), store, storage.NewMemoryStore(), Options{MachineID: "m", Now: func() time.Time { return now }})
+	if err != nil || len(result.Published) != 1 {
+		t.Fatalf("legacy request was not processed: result=%#v err=%v", result, err)
+	}
+	requests, err := store.LoadRequests()
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("legacy request remained pending: %#v err=%v", requests, err)
+	}
+}
+
 func TestRunRejectsTranscriptAboveCollectionLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.jsonl")
