@@ -144,7 +144,9 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 		return handleSessionStart(home, store, cfg, harness, nativeSessionID, payload, now)
 	case hookEventTurnStart:
 		return handleSessionActivity(store, harness, nativeSessionID, eventName, payload, now)
-	case hookEventStop, hookEventSubagentStop, hookEventResponse:
+	case hookEventSubagentStop:
+		return handleSubagentStop(store, cfg, harness, nativeSessionID, eventName, payload, now)
+	case hookEventStop, hookEventResponse:
 		return handleSessionStop(store, harness, nativeSessionID, eventName, payload, now)
 	}
 	return nil

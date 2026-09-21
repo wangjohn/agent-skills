@@ -81,6 +81,7 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		return Result{}, errors.New("machine ID is required")
 	}
 	now := opts.now()
+	materializationIssues := materializeSubagentCandidates(local, opts)
 
 	registrations, err := local.LoadRegistrations()
 	if err != nil {
@@ -101,7 +102,7 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		}
 	}
 
-	result := Result{Errors: map[string]error{}}
+	result := Result{Errors: materializationIssues}
 	pending := 0
 	for _, reg := range registrations {
 		if opts.AcceptSession != nil && !opts.AcceptSession(reg) {
@@ -112,6 +113,10 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 
 		if err := local.SetScanPending(reg.ArchiveSessionID, true); err != nil {
 			return result, fmt.Errorf("journal pending scan: %w", err)
+		}
+		if err := markPublishedSubagent(local, reg); err != nil {
+			result.Errors[reg.ArchiveSessionID] = err
+			pending++
 		}
 		outcome, err := processSession(ctx, local, store, reg, req, now, opts)
 		if err != nil {
@@ -137,6 +142,10 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		switch outcome {
 		case outcomePublished:
 			result.Published = append(result.Published, reg.ArchiveSessionID)
+			if err := markPublishedSubagent(local, reg); err != nil {
+				result.Errors[reg.ArchiveSessionID] = err
+				pending++
+			}
 		case outcomeRateLimited:
 			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
 		case outcomeSkipped:
@@ -206,6 +215,9 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// Unsafe format: never upload; the last published snapshot, if any,
 		// remains untouched and readable.
 		return outcomeSkipped, fmt.Errorf("filter transcript: %w", err)
+	}
+	if err := validateSubagentTranscript(reg, filtered); err != nil {
+		return outcomeSkipped, err
 	}
 
 	prevBundle, _, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)

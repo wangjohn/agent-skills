@@ -21,3 +21,15 @@ works for an installed application version.
 the payload is insufficient for the archive claim. Installed-version support
 remains `unverified` until a session from that observed version is published
 and read back under the current configuration.
+
+Claude child capture is `fixture_validated`: documented `SubagentStop` provides
+`session_id`, `agent_id`, and `agent_transcript_path`, and synthetic JSONL fixtures
+exercise the adapter. This does not certify any installed app version. A child
+file must expose matching native parent and agent IDs and complete timestamp
+provenance. Unknown formats are rejected. Codex and Cursor child capture remain
+unavailable until their native identity formats are proven.
+
+`SubagentStart` is deliberately not a freshness signal: Claude also fires it
+when resuming or messaging an existing agent. A stop stages a local candidate;
+background collection establishes native eligibility. Nothing reads the child
+transcript or contacts storage in the hook.

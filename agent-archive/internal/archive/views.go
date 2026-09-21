@@ -305,6 +305,8 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		SemanticConventions: &SemanticConventionsInfo{Name: "OpenTelemetry GenAI semantic conventions", Revision: OpenTelemetryGenAIRevision},
 		SkillDetection:      SkillDetectionUnavailable,
 		CaptureGaps:         append([]CaptureGap(nil), bundle.Capture.Gaps...), SourceBundle: reference,
+		ParentSessionID: bundle.ParentSessionID,
+		LinkedSessions:  append([]LinkedSessionReference(nil), bundle.LinkedSessions...),
 	}
 	metadata.State, metadata.TurnOutcome = deriveLifecycle(bundle.SupplementalEvidence)
 	view, err := ParseNormalized(bundle)

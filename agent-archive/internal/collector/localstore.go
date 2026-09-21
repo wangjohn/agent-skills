@@ -41,7 +41,7 @@ func NewLocalStore(home string) (*LocalStore, error) {
 	if strings.TrimSpace(home) == "" {
 		return nil, errors.New("local store home is required")
 	}
-	for _, dir := range []string{"registrations", "requests", "request-locks", "published", "pending", "sessions", "pending-scans"} {
+	for _, dir := range []string{"registrations", "requests", "request-locks", "published", "pending", "sessions", "pending-scans", "subagent-candidates"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			return nil, fmt.Errorf("create local store directory %q: %w", dir, err)
 		}

@@ -1,9 +1,17 @@
 # Agent Archive implementation and verification ledger
 
+## Current remediation status
+
+See [the eight-PR acceptance record](agent-archive-remediation-acceptance.md)
+for current implementation evidence and remaining capability/live gates.
+The historical notes below are retained for context and are superseded where
+that record differs. In particular, first-seen Cursor starts are no longer
+assumed fresh, and skill eligibility cannot be inferred from installation.
+
 ## September 21 audit follow-up
 
 The historical progress notes below describe earlier slices. The following PRs
-close the subsequent implementation audit; they are open for review, not merged.
+address the first implementation audit; they are open for review, not merged.
 
 | PR | Change | Base |
 | --- | --- | --- |
