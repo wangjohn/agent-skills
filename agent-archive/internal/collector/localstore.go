@@ -371,6 +371,7 @@ func (s *LocalStore) LoadLastPublished(archiveSessionID string) (bundle archive.
 // every retry uses the same hash and timestamps even after process restart.
 // Bundle remains available for change detection and future parser-only rebuilds.
 type PendingPublication struct {
+	MetadataOnly  bool                 `json:"metadata_only,omitempty"`
 	Bundle        archive.SourceBundle `json:"bundle"`
 	SourceKey     string               `json:"source_key"`
 	MetadataKey   string               `json:"metadata_key"`

@@ -379,7 +379,13 @@ func publishPending(ctx context.Context, local *LocalStore, store storage.Object
 			}
 		}
 	}
-	if err := local.SavePublished(id, pending.Bundle, now, CacheStatusPublished, pending.MetadataBytes); err != nil {
+	var saveErr error
+	if pending.MetadataOnly {
+		saveErr = local.saveRepublishedMetadata(id, pending, now)
+	} else {
+		saveErr = local.SavePublished(id, pending.Bundle, now, CacheStatusPublished, pending.MetadataBytes)
+	}
+	if err := saveErr; err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}
 	if pending.RequestToken != "" {

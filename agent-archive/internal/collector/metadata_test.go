@@ -113,3 +113,45 @@ func TestParserMetadataRetryUsesSavedBytes(t *testing.T) {
 		t.Fatal("parser retry changed source")
 	}
 }
+
+func TestMetadataUpgradePreservesNewerDeclinedCandidate(t *testing.T) {
+	local := newTestStore(t)
+	reg := registration(t, writeTranscript(t, t.TempDir(), "s.jsonl", codexTranscript))
+	now := reg.RegisteredAt.Add(time.Hour)
+	if err := local.SaveRegistration(reg); err != nil {
+		t.Fatal(err)
+	}
+	remote := storage.NewMemoryStore()
+	opts := Options{MachineID: "m", ParserVersion: "one", Now: func() time.Time { return now }}
+	result, err := Run(context.Background(), local, remote, opts)
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	bundle, at, _, err := local.LoadLastPublished(reg.ArchiveSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	richer := bundle
+	richer.NativeRecords = append(richer.NativeRecords, map[string]any{"type": "event_msg", "message": "retained candidate"})
+	richer.Capture.CapturedAt = now.Add(time.Minute)
+	if err := local.SavePublished(reg.ArchiveSessionID, richer, at, CacheStatusDeclined); err != nil {
+		t.Fatal(err)
+	}
+	opts.ParserVersion = "two"
+	now = now.Add(time.Hour)
+	result, err = Run(context.Background(), local, remote, opts)
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	candidate, _, status, _, err := local.LoadPublished(reg.ArchiveSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != CacheStatusDeclined || !candidate.Capture.CapturedAt.Equal(richer.Capture.CapturedAt) || len(candidate.NativeRecords) != len(richer.NativeRecords) {
+		t.Fatal("metadata-only update discarded local evidence")
+	}
+	actual, _, _, err := local.LoadLastPublished(reg.ArchiveSessionID)
+	if err != nil || len(actual.NativeRecords) != len(bundle.NativeRecords) {
+		t.Fatal("publication ledger points to unpublished candidate")
+	}
+}

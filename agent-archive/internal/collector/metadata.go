@@ -44,7 +44,8 @@ func regenerateMetadata(ctx context.Context, store *LocalStore, remote storage.O
 	if err != nil {
 		return outcomeSkipped, false, err
 	}
-	if len(encoded) == 0 {
+	legacy := len(encoded) == 0
+	if legacy {
 		// One-time migration for publications made before metadata was cached.
 		encoded, err = remote.Get(ctx, key)
 		if err != nil {
@@ -58,7 +59,10 @@ func regenerateMetadata(ctx context.Context, store *LocalStore, remote storage.O
 	if prior.SessionID != reg.ArchiveSessionID || prior.MachineID != opts.MachineID {
 		return outcomeSkipped, false, fmt.Errorf("published metadata does not match this machine's session")
 	}
-	if prior.Parser.Version == opts.parserVersion() && prior.Parser.Status != archive.ParserStatusFailed {
+	if err := prior.ValidateSourceReference(); err != nil {
+		return outcomeSkipped, false, err
+	}
+	if !legacy && prior.Parser.Version == opts.parserVersion() && prior.Parser.Status != archive.ParserStatusFailed {
 		if err := store.cacheMetadata(reg.ArchiveSessionID, encoded); err != nil {
 			return outcomeSkipped, false, err
 		}
@@ -72,8 +76,11 @@ func regenerateMetadata(ctx context.Context, store *LocalStore, remote storage.O
 	if err != nil {
 		return outcomeSkipped, false, err
 	}
-	if prior.SourceBundle.Key != sourceKey || prior.SourceBundle.SHA256 != compressed.SHA256 {
+	if prior.SourceBundle.Key != sourceKey || prior.SourceBundle.SHA256 != compressed.SHA256 || prior.SourceBundle.CompressedBytes != len(compressed.Bytes) {
 		return outcomeSkipped, false, fmt.Errorf("published metadata does not match the cached source")
+	}
+	if legacy && prior.Parser.Version == opts.parserVersion() && prior.Parser.Status != archive.ParserStatusFailed {
+		return outcomeSkipped, false, store.cacheMetadata(reg.ArchiveSessionID, encoded)
 	}
 	next, buildErr := archive.BuildMetadata(bundle, opts.MachineID, reg.SessionStartedAt, now, prior.SourceBundle, archive.ParserInfo{Version: opts.parserVersion()})
 	if buildErr != nil && !archive.IsParseError(buildErr) {
@@ -81,8 +88,14 @@ func regenerateMetadata(ctx context.Context, store *LocalStore, remote storage.O
 	}
 	comparison := next
 	comparison.MetadataDerivedAt = prior.MetadataDerivedAt
-	oldBytes, _ := json.Marshal(prior)
-	comparisonBytes, _ := json.Marshal(comparison)
+	oldBytes, err := json.Marshal(prior)
+	if err != nil {
+		return outcomeSkipped, false, err
+	}
+	comparisonBytes, err := json.Marshal(comparison)
+	if err != nil {
+		return outcomeSkipped, false, err
+	}
 	if bytes.Equal(oldBytes, comparisonBytes) {
 		return outcomeSkipped, false, nil
 	}
@@ -90,7 +103,7 @@ func regenerateMetadata(ctx context.Context, store *LocalStore, remote storage.O
 	if err != nil {
 		return outcomeSkipped, false, err
 	}
-	pending := PendingPublication{Bundle: bundle, SourceKey: sourceKey, MetadataKey: key, SourceSHA256: compressed.SHA256, SourceBytes: compressed.Bytes, MetadataBytes: metadataBytes, ReadyAt: now}
+	pending := PendingPublication{MetadataOnly: true, Bundle: bundle, SourceKey: sourceKey, MetadataKey: key, SourceSHA256: compressed.SHA256, SourceBytes: compressed.Bytes, MetadataBytes: metadataBytes, ReadyAt: now}
 	if err := store.SavePending(reg.ArchiveSessionID, pending); err != nil {
 		return outcomeSkipped, false, err
 	}
@@ -107,5 +120,20 @@ func (s *LocalStore) cacheMetadata(id string, metadata []byte) error {
 		return nil
 	}
 	state.MetadataBytes = metadata
+	return local.Write(s.publishedPath(id), state)
+}
+
+// Updating a summary must not discard a richer local-only candidate.
+func (s *LocalStore) saveRepublishedMetadata(id string, pending PendingPublication, at time.Time) error {
+	var state publishedState
+	if err := local.Read(s.publishedPath(id), &state); err != nil {
+		return err
+	}
+	state.LastPublished = &publishedSnapshot{Bundle: pending.Bundle, PublishedAt: at}
+	state.MetadataBytes = pending.MetadataBytes
+	state.PublishedAt = at
+	if state.Status == CacheStatusPublished {
+		state.Bundle = pending.Bundle
+	}
 	return local.Write(s.publishedPath(id), state)
 }
