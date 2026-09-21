@@ -165,6 +165,9 @@ func boundedVersionCommand(argv ...string) (string, bool) {
 
 func installedVersionSupport(discovery applicationDiscovery, verifiedVersions []string) string {
 	if !discovery.Installed {
+		if discovery.VersionState != "absent" {
+			return "unknown"
+		}
 		return "absent"
 	}
 	if discovery.Version == "" || discovery.VersionState == "stale" {

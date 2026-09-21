@@ -218,7 +218,7 @@ func readStatus(env Env) (view statusView, err error) {
 			if found && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
-			_, actualAt, published, e := store.LoadLastPublished(reg.ArchiveSessionID)
+			publishedBundle, actualAt, published, e := store.LoadLastPublished(reg.ArchiveSessionID)
 			if e != nil {
 				return view, e
 			}
@@ -239,8 +239,8 @@ func readStatus(env Env) (view statusView, err error) {
 						app.VerifiedAt = verification.VerifiedAt
 					}
 					app.State = "published; source verified"
-					if reg.Harness.Version != "" && !containsString(app.verifiedHarnessVersions, reg.Harness.Version) {
-						app.verifiedHarnessVersions = append(app.verifiedHarnessVersions, reg.Harness.Version)
+					if version := publishedBundle.Capture.Harness.Version; version != "" && !containsString(app.verifiedHarnessVersions, version) {
+						app.verifiedHarnessVersions = append(app.verifiedHarnessVersions, version)
 					}
 				} else if !verification.VerifiedAt.IsZero() {
 					app.VerificationState = "stale"
@@ -271,7 +271,7 @@ func readStatus(env Env) (view statusView, err error) {
 		if appDiscovery.VersionState == "" {
 			appDiscovery.VersionState = "unknown"
 		}
-		if !appDiscovery.ObservedAt.IsZero() && env.now().Sub(appDiscovery.ObservedAt) > 24*time.Hour {
+		if !appDiscovery.ObservedAt.IsZero() && (env.now().Before(appDiscovery.ObservedAt) || env.now().Sub(appDiscovery.ObservedAt) > 24*time.Hour) {
 			appDiscovery.VersionState = "stale"
 		}
 		view.Apps[i].Installed = appDiscovery.Installed

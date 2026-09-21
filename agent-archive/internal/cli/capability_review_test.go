@@ -1,0 +1,92 @@
+package cli
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
+)
+
+func TestSetupShowsVersionsBeforeActivationAndDiscoversOnce(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now().UTC())
+	calls := 0
+	env.DiscoverApplications = func(string) map[string]applicationDiscovery {
+		calls++
+		return map[string]applicationDiscovery{"codex": {Installed: true, Version: "1.2.3", VersionState: "observed"}}
+	}
+	input := s3SetupInput("test", "us-east-1", "profile", true, false, false, project)
+	output := setupRun(t, env, strings.TrimSuffix(input, "y\n")+"n\n", 0)
+	if calls != 1 || !strings.Contains(output, "installed version 1.2.3") {
+		t.Fatalf("calls %d output %s", calls, output)
+	}
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("cancel activated configuration")
+	}
+	observations, err := readApplicationDiscoveries(home)
+	if err != nil || len(observations) != 0 {
+		t.Fatalf("cancel persisted discovery: %v %v", observations, err)
+	}
+}
+func TestVersionSupportUsesPublishedVersionNotResumedRegistration(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	at := time.Now().UTC()
+	cfg := config.Config{MachineID: "machine", Storage: credentialsTestConfig(), Harnesses: []string{"codex"}, Archive: archive.Config{Enabled: true, Projects: []archive.ProjectActivation{{Root: project, Included: true, ActivatedAt: at.Add(-time.Hour)}}}}
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	localStore, err := collector.NewLocalStore(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(project, "synthetic.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"turn_context","model":"synthetic"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reg := archive.SessionRegistration{ArchiveSessionID: "s", NativeSessionID: "n", ProjectID: "p", ProjectRoot: project, Harness: archive.Harness{Name: "codex", Version: "1.2.3"}, TranscriptPath: path, SessionStartedAt: at, RegisteredAt: at}
+	if err := localStore.SaveRegistration(reg); err != nil {
+		t.Fatal(err)
+	}
+	remote := storage.NewMemoryStore()
+	result, err := collector.Run(context.Background(), localStore, remote, collector.Options{MachineID: cfg.MachineID, Now: func() time.Time { return at }})
+	if err != nil || len(result.Errors) > 0 {
+		t.Fatalf("%+v %v", result, err)
+	}
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), at)
+	if err := verifyPublications(home, cfg, env, localStore, remote, &result); err != nil || len(result.Errors) > 0 {
+		t.Fatalf("%+v %v", result, err)
+	}
+	reg.Harness.Version = "2.0.0"
+	if err := localStore.SaveRegistration(reg); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordApplicationDiscoveries(home, map[string]applicationDiscovery{"codex": {Installed: true, Version: "2.0.0", VersionState: "observed"}}, at); err != nil {
+		t.Fatal(err)
+	}
+	view, err := readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Apps[0].VersionSupport != "unverified" {
+		t.Fatalf("unpublished resumed version verified: %+v", view.Apps[0])
+	}
+}
+func TestMissingVersionDiscoveryIsUnknown(t *testing.T) {
+	if got := installedVersionSupport(applicationDiscovery{}, nil); got != "unknown" {
+		t.Fatal(got)
+	}
+	if got := installedVersionSupport(applicationDiscovery{Installed: true, Version: "1.0.0"}, []string{"11.0.0"}); got != "unverified" {
+		t.Fatal(got)
+	}
+	var output cappedBuffer
+	if _, err := output.Write([]byte(strings.Repeat("x", 5000))); err == nil || output.Len() > 4096 {
+		t.Fatal("version output not bounded")
+	}
+}
