@@ -29,7 +29,7 @@ func (e *FilterError) Error() string { return "unsafe source format: " + e.Reaso
 
 var ErrUnsafeSourceFormat = &FilterError{Reason: "no recognized safe records"}
 
-const adapterVersion = "0.1.0"
+const adapterVersion = "0.2.0"
 
 // DefaultParserVersion is the source parser version reported by this bounded
 // foundation. The parser is intentionally partial until fixture coverage proves
@@ -165,8 +165,9 @@ var allowedKeys = map[string]bool{
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
 	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"truncated": true, "omitted_count": true, "snapshot_omitted_count": true, "inventory_complete": true, "root_status": true,
-	"skill":     true,
-	"file_path": true,
+	"skill":              true,
+	"file_path":          true,
+	"archive_session_id": true, "relationship": true, "code": true, "detail": true,
 }
 
 var blockedKeys = map[string]bool{
@@ -178,7 +179,7 @@ var blockedKeys = map[string]bool{
 }
 
 func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (FilteredTranscript, error) {
-	result := FilteredTranscript{Format: format}
+	result := FilteredTranscript{Format: format, NativeStartComplete: true}
 	scanner := bufio.NewScanner(r)
 	// Individual native JSONL records can contain tool output. A hard limit keeps
 	// filtering bounded; exceeding it is unsafe rather than silently truncated.
@@ -202,12 +203,24 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(line, &raw); err != nil {
+			result.NativeStartComplete = false
 			addGap("incomplete_or_invalid_record", lineNo, "jsonl record omitted")
 			continue
 		}
+		observed := parseNativeTimestamp(raw)
 		if result.FirstEventAt.IsZero() {
-			result.FirstEventAt = parseNativeTimestamp(raw)
+			result.FirstEventAt = observed
 		}
+		if observed.IsZero() {
+			result.NativeStartComplete = false
+		} else if result.NativeStartAt.IsZero() || observed.Before(result.NativeStartAt) {
+			result.NativeStartAt = observed
+		}
+		if !observed.IsZero() && (result.NativeEndAt.IsZero() || observed.After(result.NativeEndAt)) {
+			result.NativeEndAt = observed
+		}
+		result.SessionIDs = appendUniqueString(result.SessionIDs, firstString(raw, "session_id", "sessionId"))
+		result.AgentIDs = appendUniqueString(result.AgentIDs, firstString(raw, "agent_id", "agentId"))
 		kind, _ := raw["type"].(string)
 		cursorRoleContent := format == "cursor-jsonl" && kind == "" && firstString(raw, "role") != ""
 		if !knownTypes[kind] && !cursorRoleContent {
@@ -236,6 +249,18 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 	}
 	sort.SliceStable(result.Gaps, func(i, j int) bool { return result.Gaps[i].Code < result.Gaps[j].Code })
 	return result, nil
+}
+
+func appendUniqueString(values []string, candidate string) []string {
+	if candidate == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
 }
 
 func parseNativeTimestamp(record map[string]any) time.Time {

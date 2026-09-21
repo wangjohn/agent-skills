@@ -13,7 +13,7 @@ import (
 const (
 	SourceSchemaVersion   = 1
 	MetadataSchemaVersion = 1
-	FilterVersion         = "1"
+	FilterVersion         = "2"
 	// OpenTelemetryGenAIRevision pins the upstream definitions used by the
 	// three gen_ai.* attributes emitted by BuildMetadata. The archive is not
 	// an OTLP payload; all agent_archive.* attributes are local extensions.
@@ -103,7 +103,30 @@ const (
 	EvidenceKindLifecycleHook    SupplementalEvidenceKind = "lifecycle_hook"
 	EvidenceKindFinalResponse    SupplementalEvidenceKind = "final_response"
 	EvidenceKindExplicitFeedback SupplementalEvidenceKind = "explicit_feedback"
+	EvidenceKindLinkedSession    SupplementalEvidenceKind = "linked_session"
+	EvidenceKindCaptureGap       SupplementalEvidenceKind = "capture_gap"
 )
+
+// LinkedSessionStatus is the durable producer state for a child session.
+// Readers resolve it against remote metadata to distinguish an upload still
+// pending from a published child whose metadata is now unavailable.
+type LinkedSessionStatus string
+
+const (
+	LinkedSessionPending     LinkedSessionStatus = "pending"
+	LinkedSessionPublished   LinkedSessionStatus = "published"
+	LinkedSessionUnavailable LinkedSessionStatus = "unavailable"
+)
+
+// LinkedSessionReference identifies a separately archived source. It carries
+// no transcript content and never contributes to the containing session's
+// counts.
+type LinkedSessionReference struct {
+	SessionID    string              `json:"session_id"`
+	Relationship string              `json:"relationship"`
+	Status       LinkedSessionStatus `json:"status"`
+	ObservedAt   time.Time           `json:"observed_at"`
+}
 
 // ModelSummarySource names where a ModelSummary's attribution came from.
 type ModelSummarySource string
@@ -169,14 +192,18 @@ type Harness struct {
 // needs. TranscriptPath is local operational data and is never placed in a
 // SourceBundle or Metadata document.
 type SessionRegistration struct {
-	ArchiveSessionID string    `json:"archive_session_id"`
-	NativeSessionID  string    `json:"native_session_id"`
-	ProjectID        string    `json:"project_id"`
-	ProjectRoot      string    `json:"project_root"`
-	Harness          Harness   `json:"harness"`
-	TranscriptPath   string    `json:"transcript_path"`
-	SessionStartedAt time.Time `json:"session_started_at"`
-	RegisteredAt     time.Time `json:"registered_at"`
+	ArchiveSessionID      string    `json:"archive_session_id"`
+	NativeSessionID       string    `json:"native_session_id"`
+	ProjectID             string    `json:"project_id"`
+	ProjectRoot           string    `json:"project_root"`
+	Harness               Harness   `json:"harness"`
+	TranscriptPath        string    `json:"transcript_path"`
+	SessionStartedAt      time.Time `json:"session_started_at"`
+	RegisteredAt          time.Time `json:"registered_at"`
+	ParentSessionID       string    `json:"parent_session_id,omitempty"`
+	ParentNativeSessionID string    `json:"parent_native_session_id,omitempty"`
+	SubagentID            string    `json:"subagent_id,omitempty"`
+	SubagentObservedAt    time.Time `json:"subagent_observed_at,omitempty"`
 }
 
 func (r SessionRegistration) Validate() error {
@@ -213,12 +240,17 @@ type CaptureBoundary struct {
 // FilteredTranscript is the only adapter output accepted by NewSourceBundle.
 // Records retain their allowed native JSON shape and source ordering.
 type FilteredTranscript struct {
-	Format       string          `json:"format"`
-	Records      [][]byte        `json:"-"`
-	Boundary     CaptureBoundary `json:"boundary"`
-	Gaps         []CaptureGap    `json:"gaps,omitempty"`
-	FirstEventAt time.Time       `json:"-"`
-	Text         []string        `json:"-"`
+	Format              string          `json:"format"`
+	Records             [][]byte        `json:"-"`
+	Boundary            CaptureBoundary `json:"boundary"`
+	Gaps                []CaptureGap    `json:"gaps,omitempty"`
+	FirstEventAt        time.Time       `json:"-"`
+	Text                []string        `json:"-"`
+	SessionIDs          []string        `json:"-"`
+	AgentIDs            []string        `json:"-"`
+	NativeStartAt       time.Time       `json:"-"`
+	NativeEndAt         time.Time       `json:"-"`
+	NativeStartComplete bool            `json:"-"`
 }
 
 // SupplementalEvidence is hook-only evidence. Payload must already be
@@ -246,14 +278,16 @@ type SourceCapture struct {
 // SourceBundle is the durable filtered source envelope. It intentionally has
 // no normalized transcript or local filesystem path.
 type SourceBundle struct {
-	SchemaVersion        int                    `json:"schema_version"`
-	ArchiveSessionID     string                 `json:"archive_session_id"`
-	NativeSessionID      string                 `json:"native_session_id"`
-	ProjectID            string                 `json:"project_id"`
-	Capture              SourceCapture          `json:"capture"`
-	NativeRecords        []map[string]any       `json:"native_records"`
-	NativeText           []TextTranscript       `json:"native_text,omitempty"`
-	SupplementalEvidence []SupplementalEvidence `json:"supplemental_evidence,omitempty"`
+	SchemaVersion        int                      `json:"schema_version"`
+	ArchiveSessionID     string                   `json:"archive_session_id"`
+	NativeSessionID      string                   `json:"native_session_id"`
+	ProjectID            string                   `json:"project_id"`
+	Capture              SourceCapture            `json:"capture"`
+	NativeRecords        []map[string]any         `json:"native_records"`
+	NativeText           []TextTranscript         `json:"native_text,omitempty"`
+	SupplementalEvidence []SupplementalEvidence   `json:"supplemental_evidence,omitempty"`
+	ParentSessionID      string                   `json:"parent_session_id,omitempty"`
+	LinkedSessions       []LinkedSessionReference `json:"linked_sessions,omitempty"`
 }
 
 // TextTranscript preserves a safely filtered native text transcript without
@@ -345,4 +379,6 @@ type Metadata struct {
 	Counts              Counts                   `json:"counts"`
 	CaptureGaps         []CaptureGap             `json:"capture_gaps,omitempty"`
 	SourceBundle        SourceReference          `json:"source_bundle"`
+	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
+	LinkedSessions      []LinkedSessionReference `json:"linked_sessions,omitempty"`
 }

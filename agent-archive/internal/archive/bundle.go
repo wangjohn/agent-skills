@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -61,6 +62,13 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 		return SourceBundle{}, err
 	}
 	allGaps := append(append([]CaptureGap(nil), transcript.Gaps...), gaps...)
+	for _, item := range filteredSupplemental {
+		if item.Kind == EvidenceKindCaptureGap {
+			if code := firstString(item.Payload, "code"); code != "" {
+				allGaps = append(allGaps, CaptureGap{Code: code, Detail: firstString(item.Payload, "detail")})
+			}
+		}
+	}
 	return SourceBundle{
 		SchemaVersion:    SourceSchemaVersion,
 		ArchiveSessionID: reg.ArchiveSessionID,
@@ -72,7 +80,70 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 			FilterVersion: FilterVersion, CapturedAt: capturedAt.UTC(), Gaps: allGaps,
 		},
 		NativeRecords: records, NativeText: nativeText, SupplementalEvidence: filteredSupplemental,
+		ParentSessionID: reg.ParentSessionID, LinkedSessions: deriveLinkedSessions(filteredSupplemental),
 	}, nil
+}
+
+func deriveLinkedSessions(evidence []SupplementalEvidence) []LinkedSessionReference {
+	latest := map[string]LinkedSessionReference{}
+	for _, item := range evidence {
+		if item.Kind != EvidenceKindLinkedSession {
+			continue
+		}
+		id := firstString(item.Payload, "archive_session_id")
+		relationship := firstString(item.Payload, "relationship")
+		status := LinkedSessionStatus(firstString(item.Payload, "status"))
+		if id == "" || relationship != "subagent" || (status != LinkedSessionPending && status != LinkedSessionPublished && status != LinkedSessionUnavailable) {
+			continue
+		}
+		candidate := LinkedSessionReference{SessionID: id, Relationship: relationship, Status: status, ObservedAt: item.ObservedAt.UTC()}
+		prior, found := latest[id]
+		if !found || candidate.ObservedAt.After(prior.ObservedAt) || (candidate.ObservedAt.Equal(prior.ObservedAt) && linkedStatusRank(candidate.Status) > linkedStatusRank(prior.Status)) {
+			latest[id] = candidate
+		}
+	}
+	ids := make([]string, 0, len(latest))
+	for id := range latest {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]LinkedSessionReference, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, latest[id])
+	}
+	return out
+}
+
+// NewLinkedSessionEvidence constructs and filters the archive-generated link
+// marker shared by hooks and the background collector.
+func NewLinkedSessionEvidence(sessionID string, status LinkedSessionStatus, observedAt time.Time) (SupplementalEvidence, error) {
+	if sessionID == "" || observedAt.IsZero() || (status != LinkedSessionPending && status != LinkedSessionPublished && status != LinkedSessionUnavailable) {
+		return SupplementalEvidence{}, errors.New("linked session evidence is incomplete")
+	}
+	filtered, _, err := FilterSupplementalEvidence([]SupplementalEvidence{{
+		Kind: EvidenceKindLinkedSession, ObservedAt: observedAt,
+		Provenance: "hook:subagent-link", Payload: map[string]any{
+			"archive_session_id": sessionID, "relationship": "subagent", "status": string(status),
+		},
+	}})
+	if err != nil {
+		return SupplementalEvidence{}, err
+	}
+	if len(filtered) != 1 {
+		return SupplementalEvidence{}, errors.New("linked session evidence was not retained")
+	}
+	return filtered[0], nil
+}
+
+func linkedStatusRank(status LinkedSessionStatus) int {
+	switch status {
+	case LinkedSessionPublished:
+		return 3
+	case LinkedSessionUnavailable:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func observedHarness(base Harness, records []map[string]any) Harness {
