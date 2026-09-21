@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
@@ -55,508 +56,243 @@ func (f *fakeKeychain) Delete(_ context.Context, reference string) error {
 func setupTestEnv(t *testing.T, home, userHome string, keychain *fakeKeychain, now time.Time) Env {
 	t.Helper()
 	env := testEnv(t, home, now)
+	env.WorkingDir = func() (string, error) { return "", errors.New("no current project") }
 	env.UserHomeDir = func() (string, error) { return userHome, nil }
 	env.Executable = func() (string, error) { return "/opt/agent-archive/bin/agent-archive", nil }
 	env.DetectHarnesses = func(string) []string { return nil }
-	env.LoadLaunchAgent = func(string) error { return nil }
-	env.UnloadLaunchAgent = func(string) error { return nil }
+	state := "missing"
+	env.JobState = func(string) string { return state }
+	env.LoadLaunchAgent = func(string) error { state = "loaded"; return nil }
+	env.UnloadLaunchAgent = func(string) error { state = "missing"; return nil }
 	env.Keychain = func() (credentials.CredentialStore, error) { return keychain, nil }
 	return env
 }
 
-func s3SetupInput(bucket, region, profile string, includeCodex, includeClaude, includeCursor bool, projectRoot string) string {
+func s3SetupInput(bucket, region, profile string, codex, claude, cursor bool, project string) string {
 	yn := func(b bool) string {
 		if b {
 			return "y"
 		}
 		return "n"
 	}
-	lines := []string{
-		"2", bucket, region, profile, "", // storage: provider, bucket, region, profile, prefix(default)
-		yn(includeCodex), yn(includeClaude), yn(includeCursor), // harnesses
-		projectRoot, "", // one project, then blank to finish
-		"y", "", // capture-without-skill-use=yes, retention=default
-		"y", // enable
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return strings.Join([]string{yn(codex), yn(claude), yn(cursor), project, "", "n", "s3", bucket, region, profile, "n", "y"}, "\n") + "\n"
 }
-
-func TestSetupFirstTimeS3EndToEnd(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-
-	stdin := strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, stdin, &stdout, &stderr, env)
-	if code != 0 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+func r2SetupInput(project, secret string) string {
+	return strings.Join([]string{"y", "n", "n", project, "", "n", "r2", "test-bucket", "0123456789abcdef0123456789abcdef", "ACCESS", secret, "n", "y"}, "\n") + "\n"
+}
+func setupRun(t *testing.T, env Env, input string, want int) string {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := Run([]string{"setup"}, strings.NewReader(input), &out, &errOut, env)
+	if code != want {
+		t.Fatalf("setup exit %d want %d\n%s\n%s", code, want, &out, &errOut)
 	}
-
-	cfg, found, err := config.Load(home)
-	if err != nil || !found {
-		t.Fatalf("cfg=%#v found=%v err=%v", cfg, found, err)
-	}
-	if cfg.Storage.Provider != credentials.ProviderS3 || cfg.Storage.Bucket != "test-bucket" || cfg.Storage.Prefix != defaultPrefix {
-		t.Fatalf("storage=%#v", cfg.Storage)
-	}
-	if len(cfg.Harnesses) != 1 || cfg.Harnesses[0] != "codex" {
-		t.Fatalf("harnesses=%#v", cfg.Harnesses)
-	}
-	if len(cfg.Archive.Projects) != 1 || cfg.Archive.Projects[0].Root != "/work/widget" || !cfg.Archive.Projects[0].ActivatedAt.Equal(now) {
-		t.Fatalf("projects=%#v", cfg.Archive.Projects)
-	}
-	if cfg.RequireSkillUse {
-		t.Fatalf("expected capture-without-skill-use to be honored: RequireSkillUse=%v", cfg.RequireSkillUse)
-	}
-	if cfg.RetentionDays != defaultRetentionDays {
-		t.Fatalf("retention=%d", cfg.RetentionDays)
-	}
-	if cfg.MachineID == "" {
-		t.Fatal("expected a generated machine ID")
-	}
-
-	hookPath := filepath.Join(userHome, ".codex", "hooks.json")
-	if _, err := os.Stat(hookPath); err != nil {
-		t.Fatalf("expected codex hooks installed: %v", err)
-	}
-	claudeHookPath := filepath.Join(userHome, ".claude", "settings.json")
-	if _, err := os.Stat(claudeHookPath); err == nil {
-		t.Fatal("claude was not included and must not have hooks installed")
-	}
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", "com.agent-archive.collector.plist")
-	if _, err := os.Stat(plistPath); err != nil {
-		t.Fatalf("expected LaunchAgent plist written: %v", err)
+	return out.String() + errOut.String()
+}
+func TestSetupFirstTimeProviders(t *testing.T) {
+	for _, provider := range []string{"s3", "r2"} {
+		t.Run(provider, func(t *testing.T) {
+			home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+			kc := newFakeKeychain()
+			now := time.Now().UTC()
+			env := setupTestEnv(t, home, userHome, kc, now)
+			input := s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project)
+			if provider == "r2" {
+				input = r2SetupInput(project, "NEVER_PRINT_THIS")
+			}
+			output := setupRun(t, env, input, 0)
+			if strings.Contains(output, "NEVER_PRINT_THIS") {
+				t.Fatal("secret leaked")
+			}
+			cfg, found, err := config.Load(home)
+			if err != nil || !found || cfg.Storage.Provider != provider || cfg.RequireSkillUse || cfg.RetentionDays != 90 {
+				t.Fatalf("config: %+v %v", cfg, err)
+			}
+			if cfg.MachineID == "" || !cfg.Archive.Projects[0].ActivatedAt.Equal(now) {
+				t.Fatal("missing activation or identity")
+			}
+			if _, err := os.Stat(filepath.Join(userHome, ".codex/hooks.json")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(home, "setup-draft.json")); !os.IsNotExist(err) {
+				t.Fatal("draft should be removed")
+			}
+			if provider == "r2" {
+				if _, err := kc.Load(context.Background(), cfg.Storage.R2CredentialRef); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
-
-func TestSetupCancelAtConfirmationChangesNothing(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-
-	input := s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget")
-	input = strings.TrimSuffix(input, "y\n") + "n\n" // decline the final confirmation
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, strings.NewReader(input), &stdout, &stderr, env)
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Cancelled") {
-		t.Fatalf("stdout=%s", stdout.String())
-	}
-	if _, found, err := config.Load(home); err != nil || found {
-		t.Fatalf("cancelling must not write a config: found=%v err=%v", found, err)
-	}
-	if _, err := os.Stat(filepath.Join(userHome, ".codex", "hooks.json")); err == nil {
-		t.Fatal("cancelling must not install hooks")
-	}
-}
-
-func TestSetupAbortsOnStorageVerificationFailure(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
-		return nil, errors.New("storage unavailable")
-	}
-
-	stdin := strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, stdin, &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s", code, stdout.String())
-	}
+func TestSetupCancelAndResumeDraft(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now())
+	input := s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project)
+	setupRun(t, env, strings.TrimSuffix(input, "y\n")+"n\n", 0)
 	if _, found, _ := config.Load(home); found {
-		t.Fatal("a failed verification must not leave a config behind")
+		t.Fatal("cancel activated config")
+	}
+	if _, err := os.Stat(filepath.Join(userHome, ".codex/hooks.json")); !os.IsNotExist(err) {
+		t.Fatal("cancel installed hooks")
+	}
+	setupRun(t, env, "continue\ny\n", 0)
+	if _, found, _ := config.Load(home); !found {
+		t.Fatal("resume did not install")
 	}
 }
-
-func TestSetupReconfigurePreservesActivationTimeAndAllowsRemoval(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	firstRun := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), firstRun)
-
-	stdin := strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
-	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, stdin, &stdout, &stderr, env); code != 0 {
-		t.Fatalf("first setup failed: code=%d stderr=%s", code, stderr.String())
+func TestSetupTruncatedInputDoesNotEnable(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
+	input := s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project)
+	setupRun(t, env, strings.TrimSuffix(input, "y\n"), 1)
+	if _, found, _ := config.Load(home); found {
+		t.Fatal("EOF enabled capture")
 	}
-
-	// Reconfigure a month later: keep the existing project, add a second one.
-	secondRun := firstRun.Add(30 * 24 * time.Hour)
-	env2 := setupTestEnv(t, home, userHome, newFakeKeychain(), secondRun)
-	reconfigureInput := strings.Join([]string{
-		"2", "test-bucket", "us-east-1", "test-profile", "", // storage, same bucket
-		"y", "n", "n", // harnesses
-		"y",                // keep /work/widget
-		"/work/second", "", // add a second project, then finish
-		"y", "", // capture-without-skill-use, retention default
-		"y", // enable
-	}, "\n") + "\n"
-	stdout.Reset()
-	stderr.Reset()
-	if code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env2); code != 0 {
-		t.Fatalf("reconfigure failed: code=%d stderr=%s", code, stderr.String())
+}
+func TestSetupStorageFailureKeepsDraftAndOldSecret(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	kc := newFakeKeychain()
+	env := setupTestEnv(t, home, t.TempDir(), kc, time.Now())
+	setupRun(t, env, r2SetupInput(project, "old-private-value"), 0)
+	old, _, _ := config.Load(home)
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return nil, errors.New("offline") }
+	input := "storage\nr2\ntest-bucket\n0123456789abcdef0123456789abcdef\nn\nACCESS2\nnew-private-value\nn\ny\n"
+	output := setupRun(t, env, input, 1)
+	secret, err := kc.Load(context.Background(), old.Storage.R2CredentialRef)
+	if err != nil || secret.SecretAccessKey != "old-private-value" {
+		t.Fatal("old credential replaced")
 	}
-
-	cfg, found, err := config.Load(home)
-	if err != nil || !found {
-		t.Fatalf("found=%v err=%v", found, err)
-	}
-	if len(cfg.Archive.Projects) != 2 {
-		t.Fatalf("projects=%#v", cfg.Archive.Projects)
-	}
-	var widget, second *time.Time
-	for i := range cfg.Archive.Projects {
-		p := cfg.Archive.Projects[i]
-		switch p.Root {
-		case "/work/widget":
-			widget = &p.ActivatedAt
-		case "/work/second":
-			second = &p.ActivatedAt
+	for _, value := range []string{"old-private-value", "new-private-value"} {
+		if strings.Contains(output, value) {
+			t.Fatal("output leaked secret")
+		}
+		b, _ := os.ReadFile(filepath.Join(home, "setup-draft.json"))
+		if strings.Contains(string(b), value) {
+			t.Fatal("draft leaked secret")
 		}
 	}
-	if widget == nil || !widget.Equal(firstRun) {
-		t.Fatalf("kept project must preserve its original activation time: got %v want %v", widget, firstRun)
-	}
-	if second == nil || !second.Equal(secondRun) {
-		t.Fatalf("newly added project must activate now: got %v want %v", second, secondRun)
+	current, _, _ := config.Load(home)
+	if current.Storage.R2CredentialRef != old.Storage.R2CredentialRef {
+		t.Fatal("active config changed")
 	}
 }
-
-func TestSetupReconfigureCanRemoveAProject(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-	stdin := strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
-	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, stdin, &stdout, &stderr, env); code != 0 {
-		t.Fatalf("first setup failed: code=%d", code)
+func TestSetupReconfigurePreservesPauseIdentityActivationAndRemovesHooks(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now())
+	setupRun(t, env, s3SetupInput("test-bucket", "us-east-1", "profile", true, true, false, project), 0)
+	old, _, _ := config.Load(home)
+	old.Paused = true
+	config.Save(home, old)
+	env.Now = func() time.Time { return time.Now().Add(time.Hour) }
+	setupRun(t, env, "capture\nn\ny\nn\nn\ny\n\nn\ny\n", 0)
+	next, _, _ := config.Load(home)
+	if !next.Paused || next.MachineID != old.MachineID || !next.Archive.Projects[0].ActivatedAt.Equal(old.Archive.Projects[0].ActivatedAt) {
+		t.Fatal("reconfigure reset stable state")
 	}
-
-	removeInput := strings.Join([]string{
-		"2", "test-bucket", "us-east-1", "test-profile", "",
-		"y", "n", "n",
-		"n", // do not keep /work/widget
-		"",  // no new projects
-	}, "\n") + "\n"
-	stdout.Reset()
-	stderr.Reset()
-	code := runSetupCommand(nil, strings.NewReader(removeInput), &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("removing the only project should fail cleanly (at least one required): code=%d stdout=%s", code, stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "at least one project") {
-		t.Fatalf("stderr=%s", stderr.String())
+	b, _ := os.ReadFile(filepath.Join(userHome, ".claude/settings.json"))
+	if strings.Contains(string(b), hooks.Owner) {
+		t.Fatal("deselected app hooks remain")
 	}
 }
-
-func TestSetupR2SavesSecretAndReusesOnReconfigure(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	keychain := newFakeKeychain()
-	env := setupTestEnv(t, home, userHome, keychain, now)
-
-	r2Input := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "", // provider, bucket, account id, endpoint(blank), prefix(default)
-		"AKIAEXAMPLE", "supersecret", // access key id, secret
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env); code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+func TestSetupSchedulerFailureRestoresExistingFiles(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), time.Now())
+	setupRun(t, env, s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project), 0)
+	paths := []string{filepath.Join(home, "config.json"), filepath.Join(userHome, ".codex/hooks.json"), filepath.Join(userHome, "Library/LaunchAgents", hooks.LaunchLabel+".plist")}
+	before := map[string]string{}
+	for _, p := range paths {
+		b, _ := os.ReadFile(p)
+		before[p] = string(b)
 	}
-	cfg, _, err := config.Load(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved, err := keychain.Load(context.Background(), cfg.Storage.R2CredentialRef)
-	if err != nil || saved.AccessKeyID != "AKIAEXAMPLE" || saved.SecretAccessKey != "supersecret" {
-		t.Fatalf("saved=%#v err=%v", saved, err)
-	}
-
-	// Reconfigure, keeping the existing R2 credentials.
-	reconfigureInput := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"y", // keep existing R2 credentials
-		"y", "n", "n",
-		"y", // keep /work/widget
-		"",  // no new projects
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	stdout.Reset()
-	stderr.Reset()
-	if code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env); code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	stillSaved, err := keychain.Load(context.Background(), cfg.Storage.R2CredentialRef)
-	if err != nil || stillSaved.SecretAccessKey != "supersecret" {
-		t.Fatalf("expected the R2 secret to survive reconfiguration unchanged: %#v err=%v", stillSaved, err)
-	}
-}
-
-func TestSetupR2VerificationFailureRemovesFreshlySavedSecret(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	keychain := newFakeKeychain()
-	env := setupTestEnv(t, home, userHome, keychain, now)
-	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
-		return nil, errors.New("storage unavailable")
-	}
-
-	r2Input := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "", // provider, bucket, account id, endpoint(blank), prefix(default)
-		"AKIAEXAMPLE", "supersecret", // access key id, secret
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	if _, found, _ := config.Load(home); found {
-		t.Fatal("a failed verification must not leave a config behind")
-	}
-	if _, err := keychain.Load(context.Background(), "r2-r2-bucket"); !errors.Is(err, credentials.ErrMissingCredential) {
-		t.Fatalf("expected the freshly-saved R2 secret to be removed on verification failure, got saved=%v", err)
-	}
-}
-
-func TestSetupR2ReusedSecretSurvivesALaterVerificationFailure(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	keychain := newFakeKeychain()
-	env := setupTestEnv(t, home, userHome, keychain, now)
-
-	r2Input := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"AKIAEXAMPLE", "supersecret",
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env); code != 0 {
-		t.Fatalf("first setup failed: code=%d stderr=%s", code, stderr.String())
-	}
-
-	// Reconfigure, keeping the existing secret, but let verification fail
-	// this time. Since saveSecret is false (the secret is reused, not
-	// freshly written), rollback must never touch it.
-	env2 := setupTestEnv(t, home, userHome, keychain, now)
-	env2.OpenStore = func(config.Config) (storage.ObjectStore, error) {
-		return nil, errors.New("storage unavailable")
-	}
-	reconfigureInput := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"y", // keep existing R2 credentials
-		"y", "n", "n",
-		"y", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	stdout.Reset()
-	stderr.Reset()
-	code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env2)
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	saved, err := keychain.Load(context.Background(), "r2-r2-bucket")
-	if err != nil || saved.SecretAccessKey != "supersecret" {
-		t.Fatalf("expected the reused R2 secret to survive a later verification failure: saved=%#v err=%v", saved, err)
-	}
-}
-
-func TestRollbackHooksAndLaunchAgentUndoesInstalledState(t *testing.T) {
-	userHome := t.TempDir()
-	executable := "/opt/agent-archive/bin/agent-archive"
-	changes, err := hooks.Plan(userHome, executable, []string{"codex"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := hooks.Apply(changes); err != nil {
-		t.Fatal(err)
-	}
-	hookPath := filepath.Join(userHome, ".codex", "hooks.json")
-	if _, err := os.Stat(hookPath); err != nil {
-		t.Fatalf("expected the hook installed before rollback: %v", err)
-	}
-
-	plist, err := hooks.LaunchAgent(executable, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
-	if err := local.WriteBytes(plistPath, plist); err != nil {
-		t.Fatal(err)
-	}
-
-	unloaded := false
-	env := Env{UnloadLaunchAgent: func(p string) error {
-		if p != plistPath {
-			t.Fatalf("unload called with %q, want %q", p, plistPath)
+	originalLoad := env.LoadLaunchAgent
+	calls := 0
+	env.LoadLaunchAgent = func(p string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("cannot load new job")
 		}
-		unloaded = true
-		return nil
-	}}
-
-	var stderr bytes.Buffer
-	rollbackHooksAndLaunchAgent(env, &stderr, changes, plistPath, true)
-
-	if !unloaded {
-		t.Fatal("expected the LaunchAgent to be unloaded")
+		return originalLoad(p)
 	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Fatalf("expected the plist to be removed, stat err=%v", err)
+	output := setupRun(t, env, "retention\n120\ny\n", 1)
+	if !strings.Contains(output, "restored") {
+		t.Fatal(output)
 	}
-	if _, err := os.Stat(hookPath); err == nil {
-		t.Fatal("expected the hook to be rolled back")
+	for p, want := range before {
+		b, _ := os.ReadFile(p)
+		if string(b) != want {
+			t.Fatalf("did not restore %s", p)
+		}
 	}
-}
-
-func TestRollbackHooksAndLaunchAgentSkipsUnloadWhenNeverLoaded(t *testing.T) {
-	userHome := t.TempDir()
-	executable := "/opt/agent-archive/bin/agent-archive"
-	changes, err := hooks.Plan(userHome, executable, []string{"codex"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := hooks.Apply(changes); err != nil {
-		t.Fatal(err)
-	}
-
-	plist, err := hooks.LaunchAgent(executable, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
-	if err := local.WriteBytes(plistPath, plist); err != nil {
-		t.Fatal(err)
-	}
-
-	env := Env{UnloadLaunchAgent: func(string) error {
-		t.Fatal("unload must not be called when the LaunchAgent was never successfully loaded")
-		return nil
-	}}
-	var stderr bytes.Buffer
-	rollbackHooksAndLaunchAgent(env, &stderr, changes, plistPath, false)
-
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Fatalf("expected the plist to still be removed, stat err=%v", err)
+	if transactionPending(home) {
+		t.Fatal("successful rollback left journal")
 	}
 }
-
-func TestSetupReconfigureWithNewSecretRestoresPriorOnVerificationFailure(t *testing.T) {
+func TestSetupCrashRecoveryPreservesConcurrentEdits(t *testing.T) {
 	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	keychain := newFakeKeychain()
-	env := setupTestEnv(t, home, userHome, keychain, now)
-
-	r2Input := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"AKIAEXAMPLE", "supersecret",
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, strings.NewReader(r2Input), &stdout, &stderr, env); code != 0 {
-		t.Fatalf("first setup failed: code=%d stderr=%s", code, stderr.String())
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
+	path := filepath.Join(home, "config.json")
+	c := hooks.Change{Path: path, Before: []byte("before"), After: []byte("after"), Existed: true, Mode: 0600}
+	journal := setupJournal{Changes: []hooks.Change{c}, Plist: "/synthetic/job"}
+	local.Write(journalPath(home), journal)
+	os.WriteFile(path, []byte("user edit"), 0600)
+	if err := recoverSetup(home, env); err == nil {
+		t.Fatal("must refuse concurrent edit")
 	}
-
-	// Reconfigure with a freshly-entered secret (declining "keep existing"),
-	// but let verification fail this time. The prior, working secret must
-	// survive: it must never be deleted just because the new one failed.
-	env2 := setupTestEnv(t, home, userHome, keychain, now)
-	env2.OpenStore = func(config.Config) (storage.ObjectStore, error) {
-		return nil, errors.New("storage unavailable")
+	b, _ := os.ReadFile(path)
+	if string(b) != "user edit" {
+		t.Fatal("overwrote user edit")
 	}
-	reconfigureInput := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"n", // do not keep the existing credentials
-		"AKIANEW", "newsecret",
-		"y", "n", "n",
-		"y", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	stdout.Reset()
-	stderr.Reset()
-	code := runSetupCommand(nil, strings.NewReader(reconfigureInput), &stdout, &stderr, env2)
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	os.WriteFile(path, []byte("after"), 0600)
+	if err := recoverSetup(home, env); err != nil {
+		t.Fatal(err)
 	}
-	saved, err := keychain.Load(context.Background(), "r2-r2-bucket")
-	if err != nil {
-		t.Fatalf("expected the prior R2 credential to survive, got err=%v", err)
-	}
-	if saved.AccessKeyID != "AKIAEXAMPLE" || saved.SecretAccessKey != "supersecret" {
-		t.Fatalf("expected the prior credential restored, not the failed new one: saved=%#v", saved)
+	b, _ = os.ReadFile(path)
+	if string(b) != "before" {
+		t.Fatal("did not restore")
 	}
 }
-
-func TestSetupRejectsTruncatedInputInsteadOfDefaultingSilently(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-
-	full := s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget")
-	// Cut off well before the final "Enable automatic capture?" prompt,
-	// with no trailing newline: a truncated scripted input, or a real
-	// Ctrl-D partway through.
-	truncated := full[:len(full)/2]
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, strings.NewReader(truncated), &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("expected truncated input to fail, not silently take every default: code=%d stdout=%s", code, stdout.String())
+func TestSetupDestinationRejectsPendingAndRetiresPublishedSessions(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
+	setupRun(t, env, s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project), 0)
+	now := env.now().Add(time.Second)
+	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}
+	if err := handleHookEvent(home, "codex", payload, now); err != nil {
+		t.Fatal(err)
 	}
-	if _, found, _ := config.Load(home); found {
-		t.Fatal("truncated input must not result in a committed setup")
+	input := "storage\ns3\nother-bucket\nus-east-1\nprofile\nn\ny\n"
+	output := setupRun(t, env, input, 1)
+	if !strings.Contains(output, "pending") {
+		t.Fatal(output)
+	}
+	var out, errOut bytes.Buffer
+	env.Now = func() time.Time { return now.Add(time.Minute) }
+	if code := runSyncCommand(nil, &out, &errOut, env); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	env.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	setupRun(t, env, "continue\ny\n", 0)
+	cfg, _, _ := config.Load(home)
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if cfg.AcceptSession(regs[0]) || len(cfg.PreviousDestinations) != 1 {
+		t.Fatal("old sessions followed destination switch")
 	}
 }
-
-func TestSetupRejectsNonPositiveRetentionDays(t *testing.T) {
-	home := t.TempDir()
-	userHome := t.TempDir()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	env := setupTestEnv(t, home, userHome, newFakeKeychain(), now)
-
-	input := strings.Join([]string{
-		"2", "test-bucket", "us-east-1", "test-profile", "",
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "0", // capture-without-skill-use=yes, retention=0
-		"y",
-	}, "\n") + "\n"
-	var stdout, stderr bytes.Buffer
-	code := runSetupCommand(nil, strings.NewReader(input), &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("code=%d stdout=%s", code, stdout.String())
+func TestPromptsRetryInvalidValuesAndDeduplicatePaths(t *testing.T) {
+	var out bytes.Buffer
+	p := newPrompter(strings.NewReader("maybe\ny\n0\n-1\n30\n"), &out)
+	if yes, err := p.yesNo("Enable?", false); err != nil || !yes {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stderr.String(), "retention days must be a positive number") {
-		t.Fatalf("stderr=%s", stderr.String())
+	if n, err := p.intWithDefault("Days", 90); err != nil || n != 30 {
+		t.Fatal(n, err)
 	}
-	if _, found, _ := config.Load(home); found {
-		t.Fatal("rejecting retention days must not leave a config behind")
+	root := t.TempDir()
+	p = newPrompter(strings.NewReader("/does/not/exist\n"+root+"\n"+root+"/./\n\n"), &out)
+	projects, err := promptProjects(p, nil, time.Time{})
+	if err != nil || len(projects) != 1 {
+		t.Fatal(projects, err)
 	}
 }

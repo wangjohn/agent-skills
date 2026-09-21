@@ -35,6 +35,8 @@ type LocalStore struct {
 // NewLocalStore creates (if needed) the local store's directory layout under
 // home — ordinarily the result of local.Home() — and returns a handle to it.
 // home is caller-owned; this package never deletes it.
+func OpenLocalStoreReadOnly(home string) *LocalStore { return &LocalStore{home: home} }
+
 func NewLocalStore(home string) (*LocalStore, error) {
 	if strings.TrimSpace(home) == "" {
 		return nil, errors.New("local store home is required")
@@ -75,6 +77,9 @@ func (s *LocalStore) registrationPath(archiveSessionID string) string {
 func (s *LocalStore) LoadRegistrations() ([]archive.SessionRegistration, error) {
 	dir := filepath.Join(s.home, "registrations")
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list registrations: %w", err)
 	}
@@ -177,6 +182,9 @@ func (s *LocalStore) loadRequest(archiveSessionID string) (Request, bool, error)
 func (s *LocalStore) LoadRequests() ([]Request, error) {
 	dir := filepath.Join(s.home, "requests")
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list requests: %w", err)
 	}

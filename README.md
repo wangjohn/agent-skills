@@ -62,7 +62,7 @@ Commands:
 - `agent-archive sync` runs one collection and upload pass now.
 - `agent-archive pause` and `agent-archive resume` suspend and restore scheduled work.
 - `agent-archive list` and `agent-archive show` inspect archived sessions from the bucket, metadata first.
-- `agent-archive uninstall` removes hooks, the collector, and local state; it never touches the bucket.
+- `agent-archive uninstall` removes hooks and the collector while keeping local evidence and credentials; `--delete-local-data` explicitly removes owned local data after confirmation. It never touches the bucket.
 
 See [agent-archive/docs/install.md](agent-archive/docs/install.md) for install and uninstall steps, and the [product and engineering specification](docs/agent-run-archive-spec.md) for the design.
 

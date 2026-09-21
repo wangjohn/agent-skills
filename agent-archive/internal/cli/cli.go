@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
@@ -29,8 +30,11 @@ var Version = "dev"
 // substitute a temporary home directory, a fixed clock, and an in-memory
 // object store. A nil field defaults to the real thing.
 type Env struct {
-	Home func() (string, error)
-	Now  func() time.Time
+	WorkingDir func() (string, error)
+	// JobState reports loaded, running, missing, or unknown without changing launchd.
+	JobState func(string) string
+	Home     func() (string, error)
+	Now      func() time.Time
 	// OpenStore builds the object store a collector pass publishes to, from
 	// this machine's configured storage destination. Defaults to
 	// openConfiguredStore, which resolves real AWS/R2 credentials.
@@ -71,6 +75,13 @@ func (e Env) home() (string, error) {
 		return e.Home()
 	}
 	return local.Home()
+}
+
+func (e Env) readHome() (string, error) {
+	if e.Home != nil {
+		return e.Home()
+	}
+	return local.ReadHome()
 }
 
 func (e Env) now() time.Time {
@@ -129,43 +140,50 @@ func (e Env) keychain() (credentials.CredentialStore, error) {
 	return credentials.NewKeychainStore(credentials.KeychainService)
 }
 
-const usage = `agent-archive manages a private, local-first archive of coding-agent
-sessions across Codex, Claude Code, and Cursor.
+const usage = `Agent Archive — archive coding-agent sessions to your private storage.
 
-Usage:
-  agent-archive setup     Guided first-time setup or safe reconfiguration
-  agent-archive status    Show storage, collector, hooks, and capture coverage
-  agent-archive sync      Run one collection/upload pass now
-  agent-archive pause     Persistently pause collection and uploads
-  agent-archive resume    Resume scheduled work
-  agent-archive uninstall Remove hooks, the collector, and local state (never the bucket)
-  agent-archive list      List archived sessions (metadata only)
-  agent-archive show ID   Print one archived session's metadata sidecar
-  agent-archive --help    Show this help
-  agent-archive --version Show the version
+Get started
+  agent-archive setup       Configure apps, projects, and storage
+  agent-archive status      Check capture and see what to do next
 
-Inspecting the archive:
-  agent-archive list [--harness NAME] [--model NAME] [--skill NAME]
-                     [--skill-usage used|available|eligible_no_use]
-                     [--since DATE|AGE] [--complete]
-  agent-archive show <archive-session-id> [--harness NAME] [--normalized]
+Manage capture
+  agent-archive sync        Collect and upload pending changes now
+  agent-archive pause       Pause collection, uploads, and cleanup
+  agent-archive resume      Resume automatic capture
 
-list and show read the configured bucket and print metadata only. show
-prints conversation content only with --normalized, which downloads and
-verifies the session's source bundle before printing its normalized view.
+Inspect history
+  agent-archive list        Find archived sessions
+  agent-archive show ID     Read a session's metadata
 
-No account or hosted service is used. You supply your own private
-Cloudflare R2 or Amazon S3 bucket during setup.
+Maintenance
+  agent-archive uninstall   Remove integrations; keep local data
+
+Run agent-archive COMMAND --help for options and examples.
+Use --version to show the installed version.
+You supply a private Cloudflare R2 or Amazon S3 bucket. No archive account needed.
 `
 
 // Run dispatches one CLI invocation and returns a process exit code. It
 // never panics on malformed input; every command reports a problem through
 // stderr and a nonzero exit code instead.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
-		return 2
+	if stdout == nil {
+		stdout = io.Discard
 	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	if len(args) == 0 {
+		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	if handled, code := commandPreflight(args, stdout, stderr); handled {
+		return code
+	}
+
 	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
@@ -22,6 +23,11 @@ const SchemaVersion = 1
 // secrets: R2 secrets live in Keychain (see credentials.Config.R2CredentialRef)
 // and S3 credentials are resolved through the named AWS profile.
 type Config struct {
+	RetiredCredentialRefs []string             `json:"retired_credential_refs,omitempty"`
+	StorageVerifiedAt     time.Time            `json:"storage_verified_at,omitempty"`
+	DestinationSince      time.Time            `json:"destination_since,omitempty"`
+	PreviousDestinations  []credentials.Config `json:"previous_destinations,omitempty"`
+
 	SchemaVersion int                `json:"schema_version"`
 	MachineID     string             `json:"machine_id"`
 	Storage       credentials.Config `json:"storage"`
@@ -82,4 +88,29 @@ func SetPaused(home string, paused bool) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// AcceptSession prevents excluded apps/projects and previous destinations from
+// continuing to publish or delete sessions after reconfiguration.
+func (c Config) AcceptSession(r archive.SessionRegistration) bool {
+	if !c.DestinationSince.IsZero() && r.SessionStartedAt.Before(c.DestinationSince) {
+		return false
+	}
+	if len(c.Harnesses) > 0 {
+		found := false
+		for _, h := range c.Harnesses {
+			if h == r.Harness.Name {
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	for _, p := range c.Archive.Projects {
+		if p.Included && p.Root == r.ProjectRoot {
+			return true
+		}
+	}
+	return len(c.Archive.Projects) == 0 // older programmatic configurations
 }

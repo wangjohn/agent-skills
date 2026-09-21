@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // detectHarnesses best-effort-detects installed applications by checking
@@ -50,4 +54,27 @@ func unloadLaunchAgent(plistPath string) error {
 		return fmt.Errorf("launchctl bootout: %w: %s", err, output)
 	}
 	return nil
+}
+
+func (e Env) jobState(plist string) string {
+	if e.JobState != nil {
+		return e.JobState(plist)
+	}
+	// Injected schedulers are not the user's launchd.
+	if e.LoadLaunchAgent != nil {
+		return "missing"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), hooks.LaunchLabel)).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "Could not find service") {
+			return "missing"
+		}
+		return "unknown"
+	}
+	if strings.Contains(string(output), "state = running") {
+		return "running"
+	}
+	return "loaded"
 }

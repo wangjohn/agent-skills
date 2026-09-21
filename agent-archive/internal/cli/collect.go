@@ -83,6 +83,19 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		return collector.Result{}, fmt.Errorf("acquire lock: %w", err)
 	}
 	defer unlock()
+	if transactionPending(home) {
+		return collector.Result{}, fmt.Errorf("setup needs recovery; run agent-archive setup")
+	}
+	cfg, found, err = config.Load(home)
+	if err != nil {
+		return collector.Result{}, err
+	}
+	if !found || !cfg.Archive.Enabled {
+		return collector.Result{}, errNotSetUp
+	}
+	if cfg.Paused {
+		return collector.Result{}, errPaused
+	}
 
 	objectStore, err := env.openStore(cfg)
 	if err != nil {
@@ -92,6 +105,7 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	}
 	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
 		MachineID:       cfg.MachineID,
+		AcceptSession:   cfg.AcceptSession,
 		Now:             env.Now,
 		RequireSkillUse: cfg.RequireSkillUse,
 	})
@@ -101,6 +115,7 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 
 	sweepResult, sweepErr := retention.Sweep(context.Background(), localStore, objectStore, retention.Options{
 		Now:           env.Now,
+		AcceptSession: cfg.AcceptSession,
 		SessionMaxAge: time.Duration(cfg.RetentionDays) * 24 * time.Hour,
 	})
 	if sweepErr != nil {

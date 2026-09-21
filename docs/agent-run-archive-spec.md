@@ -35,7 +35,9 @@ Support `--help` and `--version`. Keep background-worker and hook entry points i
 
 ### Setup on each Mac
 
-The onboarding sequence is download → connect storage → select applications/projects → review and enable → verify real capture.
+The onboarding sequence is download → select applications/projects → connect storage → review and enable → verify real capture.
+
+The implemented CLI refinement is described in [the setup and CLI plan](agent-archive-cli-plan.md). Setup saves non-secret drafts between completed steps, offers focused edits on rerun, and finishes configuration while app verification is pending. Command help is side-effect-free. Status supports human-readable and versioned JSON output. Uninstall keeps local evidence and credentials unless `--delete-local-data` is explicitly confirmed.
 
 ```text
 $ agent-archive setup

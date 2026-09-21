@@ -57,7 +57,7 @@ func TestUnknownCommandAndNoArgs(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if code := Run(nil, nil, &out, &errOut, Env{}); code != 2 {
+	if code := Run(nil, nil, &out, &errOut, Env{}); code != 0 {
 		t.Fatalf("code=%d", code)
 	}
 }

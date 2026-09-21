@@ -69,3 +69,39 @@ Explicitly separate work per the spec. The Reader slice (PR #6) already provides
 ## Review policy
 
 Root reviews each implementation diff and test evidence before a PR becomes merge-ready. At most two implementation agents run, each in an isolated worktree. Dependent PRs target their prerequisite; independent slices share only reviewed contracts. Never include the old uncommitted Python prototype accidentally.
+
+## Setup and CLI refinement (September 2026)
+
+The [CLI plan](agent-archive-cli-plan.md) is implemented in the existing Go
+module: centralized help/argument preflight, three-step setup with non-secret
+resumable drafts and hidden terminal input, staged Keychain references, a durable
+installation recovery journal, human/JSON status, and data-preserving uninstall.
+The collector's existing source checksum read-back supplies publication evidence;
+status does not infer trust or complete coverage from configuration.
+
+Setup preserves pause, identity, and existing activation times; removed apps lose
+only owned hooks. Destination switches reject pending work and retire old sessions
+from subsequent collection/cleanup while keeping local evidence and destination
+references. Retention reductions preview owned sessions before confirmation.
+Pause uses the same machine lock as collection and asks for a retry if a pass is
+still in flight. No operation is reported paused while that pass still runs.
+
+Automated scenarios cover interruption/resume, provider setup, credential isolation,
+rollback and crash recovery, changed-file protection, project path aliases, command
+help, observed status, destination boundaries, and uninstall with unknown files.
+Live cloud credentials, real app trust, launchd transitions, two-Mac operation, and
+signed/notarized release verification remain external checks. The Python recorder
+is explicitly a legacy prototype, not the runtime for the new CLI.
+
+Local verification for this refinement:
+
+- `go test -race ./...` passed, followed by targeted CLI/control regressions
+  after final changes; `go vet ./...` passed.
+- Skill validation and all 15 legacy Python tests passed.
+- `scripts/build-release.sh` built unsigned `dev` binaries for macOS Intel
+  and Apple Silicon; both generated SHA-256 checksums verified.
+- The native built executable passed all eight command-help smoke checks,
+  invalid-argument handling, and unconfigured JSON status. None created an
+  archive data directory.
+- A pseudo-terminal test verified secret input disables terminal echo and
+  restores it afterward. It used a synthetic secret and no Keychain/cloud access.

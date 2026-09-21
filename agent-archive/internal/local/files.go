@@ -18,7 +18,9 @@ func ID() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-func Home() (string, error) {
+func Home() (string, error)     { return resolveHome(true) }
+func ReadHome() (string, error) { return resolveHome(false) }
+func resolveHome(create bool) (string, error) {
 	path := os.Getenv("AGENT_ARCHIVE_HOME")
 	if path == "" {
 		home, e := os.UserHomeDir()
@@ -60,6 +62,9 @@ func Home() (string, error) {
 		if filepath.Dir(p) == p {
 			break
 		}
+	}
+	if !create {
+		return path, nil
 	}
 	if e = os.MkdirAll(path, 0700); e != nil {
 		return "", e
@@ -118,8 +123,10 @@ func Read(path string, value any) error {
 
 var ErrBusy = errors.New("another collector or setup is running")
 
-func Lock(home string) (func(), error) {
-	f, e := os.OpenFile(filepath.Join(home, "collector.lock"), os.O_CREATE|os.O_RDWR, 0600)
+func Lock(home string) (func(), error) { return NamedLock(home, "collector.lock") }
+
+func NamedLock(home, name string) (func(), error) {
+	f, e := os.OpenFile(filepath.Join(home, name), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return nil, e
 	}
