@@ -23,6 +23,17 @@ jobs:
           go-version-file: agent-archive/go.mod
           cache-dependency-path: agent-archive/go.sum
 
+      - name: Require release signing configuration
+        env:
+          APPLE_SIGNING_ENABLED: ${{ vars.APPLE_SIGNING_ENABLED }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: ./scripts/check-release-signing.sh
+
       - name: Derive version from tag
         id: version
         run: |
@@ -57,7 +68,6 @@ jobs:
 
       - name: Import signing certificate
         id: signing
-        if: ${{ vars.APPLE_SIGNING_ENABLED == 'true' }}
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -79,7 +89,6 @@ jobs:
           echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
 
       - name: Codesign
-        if: ${{ steps.signing.outcome == 'success' }}
         run: |
           for binary in dist/agent-archive-darwin-amd64 dist/agent-archive-darwin-arm64; do
             codesign --force --options runtime --timestamp \
@@ -88,7 +97,6 @@ jobs:
           done
 
       - name: Notarize
-        if: ${{ steps.signing.outcome == 'success' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -104,7 +112,8 @@ jobs:
             zip -j "$RUNNER_TEMP/notarize-${arch}.zip" "$binary"
             xcrun notarytool submit "$RUNNER_TEMP/notarize-${arch}.zip" \
               --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-              --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json > "$RUNNER_TEMP/notary-${arch}.json"
+            python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); sys.exit(0 if result.get("status") == "Accepted" else "Notarization was not accepted")' "$RUNNER_TEMP/notary-${arch}.json"
           done
 
       - name: Clean up signing keychain
