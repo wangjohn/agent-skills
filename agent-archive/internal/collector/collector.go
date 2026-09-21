@@ -20,6 +20,8 @@ import (
 // local.Lock(home) around Run; Run itself does not acquire it, so it stays
 // simple to call directly from tests.
 type Options struct {
+	// ParserVersion identifies metadata derivation independently of source capture.
+	ParserVersion string
 	AcceptSession func(archive.SessionRegistration) bool
 	// MachineID identifies this machine in published metadata. Required.
 	MachineID string
@@ -179,6 +181,12 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// A stop/end request is a natural debounce flush. A merely rate-limited,
 		// never-attempted candidate can be safely replaced by a richer one.
 	}
+	if !havePending {
+		if outcome, handled, err := regenerateMetadata(ctx, local, store, reg, now, opts); handled || err != nil {
+			return outcome, err
+		}
+	}
+
 	if reg.TranscriptPath == "" {
 		return outcomeSkipped, errors.New("registration has no transcript path")
 	}
@@ -278,7 +286,7 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	}
 
 	reference := archive.SourceReference{Key: sourceKey, SHA256: compressed.SHA256, CompressedBytes: len(compressed.Bytes)}
-	metadata, buildErr := archive.BuildMetadata(candidate, opts.MachineID, reg.SessionStartedAt, now, reference, archive.ParserInfo{})
+	metadata, buildErr := archive.BuildMetadata(candidate, opts.MachineID, reg.SessionStartedAt, now, reference, archive.ParserInfo{Version: opts.parserVersion()})
 	if buildErr != nil && !archive.IsParseError(buildErr) {
 		return outcomeSkipped, fmt.Errorf("derive metadata: %w", buildErr)
 	}
@@ -365,7 +373,7 @@ func publishPending(ctx context.Context, local *LocalStore, store storage.Object
 			}
 		}
 	}
-	if err := local.SavePublished(id, pending.Bundle, now, CacheStatusPublished); err != nil {
+	if err := local.SavePublished(id, pending.Bundle, now, CacheStatusPublished, pending.MetadataBytes); err != nil {
 		return outcomeSkipped, fmt.Errorf("update published cache: %w", err)
 	}
 	if pending.RequestToken != "" {

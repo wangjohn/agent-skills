@@ -267,9 +267,10 @@ const (
 // meaningful change" without redownloading or reparsing published history),
 // when that happened, and why the bundle is in the state it's in.
 type publishedState struct {
-	Bundle      archive.SourceBundle `json:"bundle"`
-	PublishedAt time.Time            `json:"published_at"`
-	Status      CacheStatus          `json:"status"`
+	MetadataBytes []byte               `json:"metadata_bytes,omitempty"`
+	Bundle        archive.SourceBundle `json:"bundle"`
+	PublishedAt   time.Time            `json:"published_at"`
+	Status        CacheStatus          `json:"status"`
 	// LastPublished survives a newer rate-limited or declined candidate so
 	// compaction checks and retention always have the actual remote baseline.
 	LastPublished *publishedSnapshot `json:"last_published,omitempty"`
@@ -287,7 +288,7 @@ func (s *LocalStore) publishedPath(archiveSessionID string) string {
 // SavePublished records the outcome of a build/publish decision for a
 // session, so the next scan can compare against it instead of rebuilding
 // from scratch. See CacheStatus for what each status means for retry.
-func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus) error {
+func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, metadata ...[]byte) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -305,7 +306,7 @@ func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.Sourc
 	if status == CacheStatusPublished {
 		last = &publishedSnapshot{Bundle: bundle, PublishedAt: publishedAt}
 	}
-	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, LastPublished: last})
+	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
 }
 
 // LoadPublished returns the last cached bundle for a session, if any.
@@ -449,4 +450,11 @@ func (s *LocalStore) ScanPending(id string) (bool, error) {
 		return false, nil
 	}
 	return pending, err
+}
+
+func publicationMetadata(previous []byte, supplied [][]byte) []byte {
+	if len(supplied) > 0 {
+		return supplied[0]
+	}
+	return previous
 }
