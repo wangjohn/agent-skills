@@ -35,11 +35,13 @@ type LocalStore struct {
 // NewLocalStore creates (if needed) the local store's directory layout under
 // home — ordinarily the result of local.Home() — and returns a handle to it.
 // home is caller-owned; this package never deletes it.
+func OpenLocalStoreReadOnly(home string) *LocalStore { return &LocalStore{home: home} }
+
 func NewLocalStore(home string) (*LocalStore, error) {
 	if strings.TrimSpace(home) == "" {
 		return nil, errors.New("local store home is required")
 	}
-	for _, dir := range []string{"registrations", "requests", "published", "sessions"} {
+	for _, dir := range []string{"registrations", "requests", "published", "sessions", "pending-scans"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			return nil, fmt.Errorf("create local store directory %q: %w", dir, err)
 		}
@@ -75,6 +77,9 @@ func (s *LocalStore) registrationPath(archiveSessionID string) string {
 func (s *LocalStore) LoadRegistrations() ([]archive.SessionRegistration, error) {
 	dir := filepath.Join(s.home, "registrations")
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list registrations: %w", err)
 	}
@@ -177,6 +182,9 @@ func (s *LocalStore) loadRequest(archiveSessionID string) (Request, bool, error)
 func (s *LocalStore) LoadRequests() ([]Request, error) {
 	dir := filepath.Join(s.home, "requests")
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list requests: %w", err)
 	}
@@ -292,4 +300,33 @@ func (s *LocalStore) LoadStatus() (Status, error) {
 		return Status{}, fmt.Errorf("read status: %w", err)
 	}
 	return status, nil
+}
+
+// SetScanPending journals work before scanning. A failed or interrupted update
+// remains pending even when the previous published cache is still valid.
+func (s *LocalStore) SetScanPending(id string, pending bool) error {
+	if !safeFileComponent(id) {
+		return errors.New("invalid session ID")
+	}
+	path := filepath.Join(s.home, "pending-scans", id+".json")
+	if pending {
+		return local.Write(path, true)
+	}
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *LocalStore) ScanPending(id string) (bool, error) {
+	if !safeFileComponent(id) {
+		return false, errors.New("invalid session ID")
+	}
+	var pending bool
+	err := local.Read(filepath.Join(s.home, "pending-scans", id+".json"), &pending)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return pending, err
 }

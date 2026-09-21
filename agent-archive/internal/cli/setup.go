@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
-	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
@@ -23,416 +21,543 @@ const defaultRetentionDays = 90
 
 var allHarnesses = []string{"codex", "claude", "cursor"}
 
-// runSetupCommand implements the guided flow from the spec's "Setup on
-// each Mac" section: connect a bucket, verify access, select applications
-// and projects, review a summary, then install hooks and the LaunchAgent.
-// Nothing is written until the final confirmation; on cancellation or any
-// failure before that point, a prior configuration (if reconfiguring) is
-// left exactly as it was.
+type setupDraft struct {
+	StagedRefs    []string      `json:"staged_credential_refs,omitempty"`
+	Version       int           `json:"version"`
+	Config        config.Config `json:"config"`
+	Step          int           `json:"step"`
+	CredentialRef string        `json:"staged_credential_ref,omitempty"`
+}
+
 func runSetupCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
-	ctx := context.Background()
-	home, err := env.home()
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: resolve home: %v\n", err)
+	if err := setup(stdin, stdout, stderr, env); err != nil {
+		fmt.Fprintf(stderr, "Setup incomplete: %v\nRun agent-archive setup to continue.\n", err)
 		return 1
 	}
-	userHome, err := env.userHomeDir()
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: resolve user home: %v\n", err)
-		return 1
-	}
-	executable, err := env.executable()
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: resolve executable path: %v\n", err)
-		return 1
-	}
-	now := env.now()
-	existing, _, err := config.Load(home)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: load existing config: %v\n", err)
-		return 1
-	}
-
-	p := newPrompter(stdin, stdout)
-
-	storageCfg, r2Secret, saveSecret, err := promptStorage(p, existing.Storage)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-
-	// credentialCommitted guards the deferred cleanup below: it flips to
-	// true only once setup actually finishes (after config.Save succeeds).
-	// Declared here, outside the "if saveSecret" block, so it stays in
-	// scope for that block's defer as well as the success path far below.
-	credentialCommitted := false
-	if saveSecret {
-		keychain, err := env.keychain()
-		if err != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: keychain: %v\n", err)
-			return 1
-		}
-		// R2CredentialRef is deterministic per bucket ("r2-"+bucket), so
-		// reconfiguring the same bucket with a freshly-entered secret
-		// overwrites, not creates, when a working credential already lives
-		// under that reference. Capture whatever is there now, before the
-		// overwrite, so a failed or abandoned setup can restore it instead
-		// of deleting it outright — deleting it would destroy a previously
-		// working credential the docstring's "nothing is written until
-		// confirmation" guarantee never intended to touch.
-		priorSecret, priorErr := keychain.Load(ctx, storageCfg.R2CredentialRef)
-		hadPrior := priorErr == nil
-		priorLoadFailed := priorErr != nil && !errors.Is(priorErr, credentials.ErrMissingCredential)
-
-		if err := keychain.Save(ctx, storageCfg.R2CredentialRef, r2Secret); err != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: save R2 credentials: %v\n", err)
-			return 1
-		}
-		// VerifyAccess below reads an R2 secret back from Keychain by
-		// reference, so it must already be saved before verification can
-		// run — the save can't simply move after VerifyAccess. Instead,
-		// this docstring's "nothing is written until confirmation"
-		// guarantee is restored here: any early return between this save
-		// and the final successful config.Save undoes it, so a failed or
-		// abandoned setup never leaves a fresh R2 secret behind, and never
-		// destroys a reused reference's prior working value either.
-		defer func() {
-			if credentialCommitted {
-				return
-			}
-			switch {
-			case hadPrior:
-				if err := keychain.Save(ctx, storageCfg.R2CredentialRef, priorSecret); err != nil {
-					fmt.Fprintf(stderr, "agent-archive: setup: warning: could not restore prior R2 credentials: %v\n", err)
-				}
-			case priorLoadFailed:
-				// Could not confirm whether this reference already held a
-				// working credential; leaving it as-is (the just-written,
-				// unconfirmed secret) is safer than guessing and possibly
-				// deleting a credential that was actually there before.
-				fmt.Fprintln(stderr, "agent-archive: setup: warning: could not confirm prior R2 credential state; leaving Keychain unchanged")
-			default:
-				if delErr := keychain.Delete(ctx, storageCfg.R2CredentialRef); delErr != nil {
-					fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove uncommitted R2 credentials: %v\n", delErr)
-				}
-			}
-		}()
-	}
-
-	fmt.Fprintln(stdout, "\nVerifying storage access...")
-	probeStore, err := env.openStore(config.Config{Storage: storageCfg})
-	if err != nil {
-		fmt.Fprintf(stderr, "  failed: %v\n", err)
-		return 1
-	}
-	if err := storage.VerifyAccess(ctx, probeStore, storageCfg.Prefix); err != nil {
-		fmt.Fprintf(stderr, "  failed: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(stdout, "  Storage access verified.")
-	fmt.Fprintln(stdout, "  Privacy not verified: a successful upload does not prove the bucket is")
-	fmt.Fprintln(stdout, "  private. Check your provider's public-access settings yourself.")
-
-	detected := env.detectHarnesses(userHome)
-	fmt.Fprintln(stdout, "\nWhich applications should sessions be captured from?")
-	if len(detected) > 0 {
-		p.help(fmt.Sprintf("Detected: %s. Including one adds hooks to its config; nothing else changes.", strings.Join(harnessDisplayNames(detected), ", ")))
-	} else {
-		p.help("None detected. Including one adds hooks to its config; nothing else changes.")
-	}
-	harnesses, err := promptHarnesses(p, detected, existing.Harnesses)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-	if len(harnesses) == 0 {
-		fmt.Fprintln(stderr, "agent-archive: setup: at least one application must be included")
-		return 1
-	}
-
-	fmt.Fprintln(stdout, "\nWhich project directories should be captured?")
-	p.help("Absolute paths, one per line. Only sessions started in exactly these directories are archived.")
-	projects, err := promptProjects(p, existing.Archive.Projects, now, userHome)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-	if len(projects) == 0 {
-		fmt.Fprintln(stderr, "agent-archive: setup: at least one project must be included")
-		return 1
-	}
-
-	fmt.Fprintln(stdout)
-	p.help("Yes keeps every session; No keeps only sessions where a skill was used.")
-	captureNoSkill, err := p.yesNo("Capture sessions without detected skill use?", !existing.RequireSkillUse || existing.MachineID == "")
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-	retentionDefault := existing.RetentionDays
-	if retentionDefault <= 0 {
-		retentionDefault = defaultRetentionDays
-	}
-	p.help("How long should sessions stay in the bucket? Older ones are deleted.")
-	retentionDays, err := p.intWithDefault("Retention (days)", retentionDefault)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-	if retentionDays <= 0 {
-		// retention.Options.SessionMaxAge treats zero (or, from a negative
-		// duration, anything non-positive) as "disabled" — never expire —
-		// which is the opposite of what a user typing "0" here, expecting
-		// aggressive cleanup, would want. This guided flow requires a real
-		// number of days rather than silently accepting that surprise.
-		fmt.Fprintln(stderr, "agent-archive: setup: retention days must be a positive number")
-		return 1
-	}
-
-	machineID := existing.MachineID
-	if machineID == "" {
-		machineID, err = local.ID()
-		if err != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: generate machine ID: %v\n", err)
-			return 1
-		}
-	}
-
-	fmt.Fprintln(stdout, "\nStorage:      ", storageCfg.Provider, "/", storageCfg.Bucket, "/", storageCfg.Prefix)
-	fmt.Fprintln(stdout, "Applications: ", strings.Join(harnesses, ", "))
-	fmt.Fprintf(stdout, "Projects:      %d included\n", len(projects))
-	fmt.Fprintln(stdout, "History:       New sessions only")
-	fmt.Fprintf(stdout, "Retention:     %d days\n", retentionDays)
-	fmt.Fprintln(stdout)
-	p.help("Ready to enable? This installs the hooks and a login LaunchAgent that publishes about once a minute.")
-	enable, err := p.yesNo("Enable automatic capture?", true)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: %v\n", err)
-		return 1
-	}
-	if !enable {
-		fmt.Fprintln(stdout, "Cancelled. No changes were made.")
-		return 0
-	}
-
-	changes, err := hooks.Plan(userHome, executable, harnesses)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: plan hooks: %v\n", err)
-		return 1
-	}
-	if err := hooks.Apply(changes); err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: install hooks: %v\n", err)
-		return 1
-	}
-
-	plist, err := hooks.LaunchAgent(executable, home)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: build LaunchAgent: %v\n", err)
-		if rbErr := hooks.Rollback(changes); rbErr != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: hook rollback also failed: %v\n", rbErr)
-		}
-		return 1
-	}
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
-	if err := local.WriteBytes(plistPath, plist); err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: write LaunchAgent: %v\n", err)
-		if rbErr := hooks.Rollback(changes); rbErr != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: hook rollback also failed: %v\n", rbErr)
-		}
-		return 1
-	}
-	launchAgentLoaded := false
-	if err := env.loadLaunchAgent(plistPath); err != nil {
-		fmt.Fprintf(stdout, "\nWarning: could not start the background collector automatically: %v\n", err)
-		fmt.Fprintln(stdout, "It will start at your next login; run `agent-archive sync` by hand until then.")
-	} else {
-		launchAgentLoaded = true
-	}
-
-	cfg := config.Config{
-		MachineID: machineID,
-		Storage:   storageCfg,
-		Archive: archive.Config{
-			SchemaVersion: 1, MachineID: machineID, Enabled: true, Projects: projects,
-		},
-		Harnesses:       harnesses,
-		RequireSkillUse: !captureNoSkill,
-		RetentionDays:   retentionDays,
-	}
-	if err := config.Save(home, cfg); err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: save config: %v\n", err)
-		// Hooks and the LaunchAgent are already live on the host at this
-		// point; without this, a config.Save failure (disk full, a
-		// permission error) would leave both running with no config.json
-		// behind them, so `status`/`sync` would treat the machine as
-		// unconfigured while hooks kept firing regardless.
-		rollbackHooksAndLaunchAgent(env, stderr, changes, plistPath, launchAgentLoaded)
-		return 1
-	}
-	credentialCommitted = true
-
-	fmt.Fprintln(stdout, "\nSetup complete. Start a session in an included application, then run")
-	fmt.Fprintln(stdout, "`agent-archive status` to confirm capture.")
 	return 0
 }
 
-// rollbackHooksAndLaunchAgent undoes hook installation and a written (and
-// possibly already-loaded) LaunchAgent plist. It is used only after
-// config.Save fails partway through setup, once hooks and the LaunchAgent
-// are already live on the host: without this, that failure would leave both
-// running with no config.json behind them. Each step is best-effort and
-// independent, so one failing does not stop the others from being tried.
-func rollbackHooksAndLaunchAgent(env Env, stderr io.Writer, changes []hooks.Change, plistPath string, launchAgentLoaded bool) {
-	if launchAgentLoaded {
-		if err := env.unloadLaunchAgent(plistPath); err != nil {
-			fmt.Fprintf(stderr, "agent-archive: setup: warning: could not unload LaunchAgent during rollback: %v\n", err)
-		}
-	}
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "agent-archive: setup: warning: could not remove LaunchAgent plist during rollback: %v\n", err)
-	}
-	if err := hooks.Rollback(changes); err != nil {
-		fmt.Fprintf(stderr, "agent-archive: setup: hook rollback also failed: %v\n", err)
-	}
-}
-
-// promptStorage collects a storage destination, defaulting every field to
-// an existing configuration when reconfiguring. It returns the R2 secret
-// (zero value if not applicable) and whether it needs saving: a blank
-// answer when existing R2 credentials are already on file keeps them
-// rather than overwriting Keychain with an empty secret.
-func promptStorage(p *prompter, existing credentials.Config) (credentials.Config, credentials.R2Credentials, bool, error) {
-	p.help("Where should sessions be stored?", "1) Cloudflare R2", "2) Amazon S3")
-	choice, err := p.withDefault("Choice", defaultProviderChoice(existing.Provider))
+func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
+	home, err := env.home()
 	if err != nil {
-		return credentials.Config{}, credentials.R2Credentials{}, false, err
+		return err
 	}
-	var cfg credentials.Config
-	switch strings.ToLower(choice) {
-	case "1", "r2":
-		cfg.Provider = credentials.ProviderR2
-		fmt.Fprintln(p.out)
-		p.help("Which existing R2 bucket? Listed under R2 Object Storage > Overview in the Cloudflare dashboard.")
-		if cfg.Bucket, err = p.withDefault("Bucket name", existing.Bucket); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+	if err = os.MkdirAll(home, 0700); err != nil {
+		return err
+	}
+	// Only another wizard is excluded while prompting; the old collector keeps working.
+	release, err := local.NamedLock(home, "setup.lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+	userHome, err := env.userHomeDir()
+	if err != nil {
+		return err
+	}
+	exe, err := env.executable()
+	if err != nil {
+		return err
+	}
+	if err = recoverSetup(home, env); err != nil {
+		return err
+	}
+	existing, found, err := config.Load(home)
+	if err != nil {
+		return err
+	}
+	p := newPrompter(stdin, out)
+	if !found {
+		fmt.Fprintln(out, "You’ll need a private Cloudflare R2 or Amazon S3 bucket. Type help at the storage prompt for instructions.")
+	}
+	draft := setupDraft{Version: 1, Config: existing}
+	draftPath := filepath.Join(home, "setup-draft.json")
+	var saved setupDraft
+	readErr := local.Read(draftPath, &saved)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read saved setup: %w", readErr)
+	}
+	if readErr == nil {
+		if saved.Version != 1 || saved.Step < 0 || saved.Step > 2 {
+			return fmt.Errorf("saved setup has an unsupported version")
 		}
-		if cfg.Bucket == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("bucket name is required")
+		choice, e := promptChoice(p, "Saved setup: continue, capture, storage, retention, or restart", "continue", "continue", "capture", "storage", "retention", "restart")
+		if e != nil {
+			return e
 		}
-		p.help("What is your Cloudflare account ID? Shown at the right of the R2 Overview page. Blank if you give the endpoint instead.")
-		if cfg.R2AccountID, err = p.withDefault("R2 account ID", existing.R2AccountID); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
-		}
-		p.help("What is the bucket's S3 endpoint? Shown under the bucket's Settings > S3 API. Blank to derive it from the account ID.")
-		if cfg.R2Endpoint, err = p.withDefault("R2 endpoint", existing.R2Endpoint); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
-		}
-		// Validate both fields the same way the store will, before any
-		// secret is collected or written to Keychain.
-		if _, err := credentials.R2Endpoint(cfg.R2Endpoint, cfg.R2AccountID); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
-		}
-		p.help("Where in the bucket should sessions go? A folder-style prefix.")
-		if cfg.Prefix, err = p.withDefault("Prefix", firstNonEmpty(existing.Prefix, defaultPrefix)); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
-		}
-		reuse := false
-		if existing.Provider == credentials.ProviderR2 && existing.R2CredentialRef != "" {
-			if reuse, err = p.yesNo("Keep the currently stored R2 credentials?", true); err != nil {
-				return cfg, credentials.R2Credentials{}, false, err
+		if choice != "restart" {
+			draft = saved
+			if choice == "storage" {
+				draft.Step = 1
+			}
+			if choice == "capture" {
+				if e = chooseCapture(p, &draft.Config, userHome, env); e != nil {
+					return e
+				}
+				draft.Step = 2
+				if draft.Config.Storage.Provider == "" {
+					draft.Step = 1
+				}
+			}
+			if choice == "retention" {
+				days := draft.Config.RetentionDays
+				if days <= 0 {
+					days = defaultRetentionDays
+				}
+				draft.Config.RetentionDays, e = p.intWithDefault("Keep sessions for how many days?", days)
+				if e != nil {
+					return e
+				}
+			}
+		} else {
+			if e = discardDraft(home, saved, existing, env); e != nil {
+				return e
 			}
 		}
-		if reuse {
-			cfg.R2CredentialRef = existing.R2CredentialRef
-			return cfg, credentials.R2Credentials{}, false, nil
+	} else if found {
+		choice, e := promptChoice(p, "Edit capture, storage, retention, or all settings", "capture", "capture", "storage", "retention", "all")
+		if e != nil {
+			return e
 		}
-		p.help(
-			"Which R2 API token? Create one under R2 > Manage R2 API Tokens with \"Object Read & Write\" scoped to this bucket.",
-			"The secret is stored in macOS Keychain. It is visible on screen as you type it.",
-		)
-		accessKeyID, err := p.line("Access key ID: ")
-		if err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+		switch choice {
+		case "storage":
+			draft.Step = 1
+		case "retention":
+			draft.Step = 2
+			draft.Config.RetentionDays, err = p.intWithDefault("Keep sessions for how many days?", existing.RetentionDays)
+			if err != nil {
+				return err
+			}
 		}
-		secretKey, err := p.line("Secret access key: ")
-		if err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+		if choice == "capture" { // Storage is still verified, but its prompts are skipped.
+			if err = chooseCapture(p, &draft.Config, userHome, env); err != nil {
+				return err
+			}
+			draft.Step = 2
 		}
-		if accessKeyID == "" || secretKey == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("access key ID and secret access key are required")
+	}
+	save := func() error { return local.Write(draftPath, draft) }
+	var verifiedStorage credentials.Config
+	for {
+		if draft.Step == 0 {
+			if err = chooseCapture(p, &draft.Config, userHome, env); err != nil {
+				return err
+			}
+			draft.Step = 1
+			if err = save(); err != nil {
+				return err
+			}
 		}
-		cfg.R2CredentialRef = "r2-" + cfg.Bucket
-		return cfg, credentials.R2Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretKey}, true, nil
-	case "2", "s3":
-		cfg.Provider = credentials.ProviderS3
-		fmt.Fprintln(p.out)
-		p.help("Which existing S3 bucket? Listed under S3 > Buckets in the AWS console, or by `aws s3 ls --profile <name>`.")
-		if cfg.Bucket, err = p.withDefault("Bucket name", existing.Bucket); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+		if draft.Step == 1 {
+			fmt.Fprintln(out, "\n2 of 3 — Connect storage")
+			cfg, secret, saveSecret, e := promptStorage(p, draft.Config.Storage, env)
+			if e != nil {
+				return e
+			}
+			if saveSecret {
+				keychain, e := env.keychain()
+				if e != nil {
+					return fmt.Errorf("open Keychain: %w", e)
+				}
+				id, e := local.ID()
+				if e != nil {
+					return e
+				}
+				cfg.R2CredentialRef = "setup-" + id
+				draft.CredentialRef = cfg.R2CredentialRef
+				draft.StagedRefs = append(draft.StagedRefs, cfg.R2CredentialRef)
+				// Journal the opaque reference before storing, so cancellation/crash is recoverable.
+				draft.Config.Storage = cfg
+				if e = save(); e != nil {
+					return e
+				}
+				if e = keychain.Save(context.Background(), cfg.R2CredentialRef, secret); e != nil {
+					return fmt.Errorf("save staged credential: %w", e)
+				}
+
+			}
+			draft.Config.Storage = cfg
+			draft.Step = 2
+			if err = save(); err != nil {
+				return err
+			}
 		}
-		if cfg.Bucket == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("bucket name is required")
+		if err = save(); err != nil {
+			return err
 		}
-		p.help("Which region is the bucket in? For example us-east-1.")
-		if cfg.Region, err = p.withDefault("AWS region", existing.Region); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+		if draft.Config.Storage.Provider == credentials.ProviderR2 {
+			kc, e := env.keychain()
+			if e != nil {
+				return e
+			}
+			if _, e = kc.Load(context.Background(), draft.Config.Storage.R2CredentialRef); e != nil {
+				draft.Step = 1
+				draft.Config.Storage.R2CredentialRef = ""
+				_ = save()
+				return fmt.Errorf("stored R2 credential is unavailable; enter it again during setup")
+			}
 		}
-		if cfg.Region == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("AWS region is required")
+		if draft.Config.Storage != verifiedStorage {
+			fmt.Fprintln(out, "\nChecking your storage connection…")
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			store, e := env.openStore(draft.Config)
+			if e != nil {
+				cancel()
+				draft.Step = 1
+				_ = save()
+				return fmt.Errorf("connect storage: %w", e)
+			}
+			e = storage.VerifyAccess(ctx, store, draft.Config.Storage.Prefix)
+			cancel()
+			if e != nil {
+				failure := fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", e)
+				fmt.Fprintln(out, failure)
+				choice, promptErr := promptChoice(p, "Edit storage settings, retry, or cancel", "cancel", "edit", "retry", "cancel")
+				if promptErr != nil || choice == "cancel" {
+					return failure
+				}
+				if choice == "edit" {
+					if err = editSetupReview(p, &draft, userHome); err != nil {
+						return err
+					}
+					if err = save(); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			draft.Config.StorageVerifiedAt = env.now().UTC()
+			verifiedStorage = draft.Config.Storage
+			fmt.Fprintln(out, "Connected.")
 		}
-		p.help("Which AWS profile can read, write, list, and delete in the bucket? Only its name is stored.")
-		if cfg.AWSProfile, err = p.withDefault("AWS profile", existing.AWSProfile); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+
+		if draft.Config.RetentionDays <= 0 {
+			draft.Config.RetentionDays = defaultRetentionDays
 		}
-		if cfg.AWSProfile == "" {
-			return cfg, credentials.R2Credentials{}, false, fmt.Errorf("AWS profile is required")
+		showSetupReview(p, draft.Config, found)
+		if existing.Paused {
+			fmt.Fprintln(out, "Capture stays paused until you run agent-archive resume.")
 		}
-		p.help("Where in the bucket should sessions go? A folder-style prefix.")
-		if cfg.Prefix, err = p.withDefault("Prefix", firstNonEmpty(existing.Prefix, defaultPrefix)); err != nil {
-			return cfg, credentials.R2Credentials{}, false, err
+		if err = reviewChanges(home, existing, draft.Config, p, env); err != nil {
+			return err
 		}
-		return cfg, credentials.R2Credentials{}, false, nil
-	default:
-		return cfg, credentials.R2Credentials{}, false, fmt.Errorf("unrecognized storage choice %q", choice)
+		label := "Start archiving?"
+		if found {
+			label = "Save these changes?"
+		}
+		action, e := reviewAction(p, label)
+		if e != nil {
+			return e
+		}
+		if action == "cancel" {
+			fmt.Fprintln(out, "Cancelled. Active settings are unchanged; your setup draft is saved.")
+			return nil
+		}
+		if action == "edit" {
+			if err = editSetupReview(p, &draft, userHome); err != nil {
+				return err
+			}
+			if err = save(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		for _, ref := range draft.StagedRefs {
+			if ref != draft.Config.Storage.R2CredentialRef && !containsString(draft.Config.RetiredCredentialRefs, ref) {
+				draft.Config.RetiredCredentialRefs = append(draft.Config.RetiredCredentialRefs, ref)
+			}
+		}
+		// Re-read under the machine lock in applySetup; it rejects concurrent config changes.
+		if err = applySetup(home, userHome, exe, existing, &draft.Config, env); err != nil {
+			return err
+		}
+		if err = os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		fmt.Fprintln(out, "\nConfiguration saved.")
+		if existing.Paused {
+			fmt.Fprintln(out, "Next: run agent-archive resume when you’re ready to start archiving.")
+		} else if containsString(draft.Config.Harnesses, "codex") {
+			fmt.Fprintln(out, "Next: in Codex CLI, open /hooks to approve the archive hooks, then start a new session in an included project.")
+			if len(draft.Config.Harnesses) > 1 {
+				fmt.Fprintln(out, "Repeat hook approval and a new session in your other selected apps.")
+			}
+		} else {
+			fmt.Fprintln(out, "Next: approve the archive hooks in your selected apps, then start a new session in an included project.")
+		}
+		fmt.Fprintln(out, "Check progress with agent-archive status.")
+		return nil
 	}
 }
 
-func defaultProviderChoice(provider string) string {
-	if provider == credentials.ProviderS3 {
-		return "2"
+func chooseCapture(p *prompter, cfg *config.Config, userHome string, env Env) error {
+	fmt.Fprintln(p.out, "\n1 of 3 — Choose what to capture")
+	detected := env.detectHarnesses(userHome)
+	var err error
+	cfg.Harnesses, err = promptHarnesses(p, detected, cfg.Harnesses)
+	if err != nil {
+		return err
 	}
-	return "1"
+	if len(cfg.Harnesses) == 0 {
+		return fmt.Errorf("choose at least one application")
+	}
+	acceptedProject := false
+	if len(cfg.Archive.Projects) == 0 {
+		dir, e := os.Getwd()
+		if env.WorkingDir != nil {
+			dir, e = env.WorkingDir()
+		}
+		if e == nil {
+			if root := suggestedProject(dir); root != "" {
+				fmt.Fprintf(p.out, "Project: %s\n", root)
+				acceptedProject, err = p.yesNo("Archive sessions in this project?", true)
+				if err != nil {
+					return err
+				}
+				if acceptedProject {
+					cfg.Archive.Projects = []archive.ProjectActivation{{ProjectID: archive.ProjectID(root), Root: root, Included: true}}
+				}
+			}
+		}
+	}
+	if !acceptedProject {
+		cfg.Archive.Projects, err = promptProjects(p, cfg.Archive.Projects, time.Time{}, userHome)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(cfg.Archive.Projects) == 0 {
+		return fmt.Errorf("choose at least one project")
+	}
+	if cfg.RetentionDays <= 0 {
+		cfg.RetentionDays = defaultRetentionDays
+	}
+	return nil
 }
 
+func promptStorage(p *prompter, existing credentials.Config, env Env) (credentials.Config, credentials.R2Credentials, bool, error) {
+	cfg := existing
+	var secret credentials.R2Credentials
+	choice, err := promptChoice(p, "Storage provider: r2 (Cloudflare) or s3 (Amazon); help for instructions", firstNonEmpty(existing.Provider, "r2"), "r2", "s3", "help")
+	for err == nil && choice == "help" {
+		fmt.Fprintln(p.out, "Cloudflare R2: create a private bucket and bucket-scoped Object Read & Write credentials. Keep public access disabled.")
+		fmt.Fprintln(p.out, "https://developers.cloudflare.com/r2/get-started/s3/")
+		fmt.Fprintln(p.out, "Amazon S3: create a private bucket and configure an AWS profile with access to it.")
+		fmt.Fprintln(p.out, "https://docs.aws.amazon.com/AmazonS3/latest/userguide/create-bucket-overview.html")
+		fmt.Fprintln(p.out, "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html")
+		choice, err = promptChoice(p, "Storage provider", firstNonEmpty(existing.Provider, "r2"), "r2", "s3", "help")
+	}
+	if err != nil {
+		return cfg, secret, false, err
+	}
+	if cfg.Provider != choice {
+		cfg = credentials.Config{Provider: choice}
+	}
+	cfg.Bucket, err = p.required("Bucket name", cfg.Bucket)
+	if err != nil {
+		return cfg, secret, false, err
+	}
+	if choice == "r2" {
+		for {
+			endpoint, e := p.required("R2 account ID or full S3 endpoint", firstNonEmpty(cfg.R2Endpoint, cfg.R2AccountID))
+			if e != nil {
+				return cfg, secret, false, e
+			}
+			if strings.Contains(endpoint, "://") {
+				cfg.R2Endpoint = endpoint
+				cfg.R2AccountID = ""
+			} else {
+				cfg.R2AccountID = endpoint
+				cfg.R2Endpoint = ""
+			}
+			normalized, e := credentials.R2Endpoint(cfg.R2Endpoint, cfg.R2AccountID)
+			if e == nil {
+				cfg.R2Endpoint = normalized
+				break
+			}
+			fmt.Fprintln(p.out, "Enter the Cloudflare R2 S3 endpoint or account ID from your dashboard.")
+		}
+		reuse := false
+		if cfg.R2CredentialRef != "" {
+			reuse, err = p.yesNo("Keep stored R2 credentials?", true)
+			if err != nil {
+				return cfg, secret, false, err
+			}
+		}
+		if !reuse {
+			secret.AccessKeyID, err = p.required("Access key ID", "")
+			if err != nil {
+				return cfg, secret, false, err
+			}
+			for secret.SecretAccessKey == "" {
+				secret.SecretAccessKey, err = p.secret("Secret access key (hidden): ")
+				if err != nil {
+					return cfg, secret, false, err
+				}
+			}
+		}
+	} else {
+		if err = promptAWSProfile(p, &cfg, env); err != nil {
+			return cfg, secret, false, err
+		}
+	}
+	cfg.Prefix = firstNonEmpty(cfg.Prefix, defaultPrefix)
+
+	return cfg, secret, secret.SecretAccessKey != "", err
+}
+
+func promptChoice(p *prompter, label, def string, choices ...string) (string, error) {
+	for {
+		value, err := p.withDefault(label, def)
+		if err != nil {
+			return "", err
+		}
+		value = strings.ToLower(value)
+		if containsString(choices, value) {
+			return value, nil
+		}
+		fmt.Fprintf(p.out, "Choose %s.\n", strings.Join(choices, " or "))
+	}
+}
+func promptHarnesses(p *prompter, detected, existing []string) ([]string, error) {
+	// Preserve an existing selection on reconfiguration. Detection supplies
+	// defaults only for first-time setup; it never proves capture is working.
+	defaults := detected
+	verb := "Include "
+	if len(existing) > 0 {
+		defaults = existing
+		verb = "Keep "
+	}
+	var suggested []string
+	for _, app := range allHarnesses {
+		if containsString(defaults, app) {
+			suggested = append(suggested, app)
+		}
+	}
+	if len(suggested) > 0 {
+		names := make([]string, len(suggested))
+		for i, app := range suggested {
+			names[i] = appName(app)
+		}
+		label := names[0]
+		if len(names) == 2 {
+			label = names[0] + " and " + names[1]
+		}
+		if len(names) > 2 {
+			label = strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1]
+		}
+		yes, err := p.yesNo(verb+label+"?", true)
+		if err != nil {
+			return nil, err
+		}
+		if yes {
+			return suggested, nil
+		}
+	} else {
+		fmt.Fprintln(p.out, "No apps found automatically.")
+	}
+	fmt.Fprintln(p.out, "Choose which apps to include:")
+	for {
+		var result []string
+		for _, app := range allHarnesses {
+			yes, err := p.yesNo("Include "+appName(app)+"?", containsString(suggested, app))
+			if err != nil {
+				return nil, err
+			}
+			if yes {
+				result = append(result, app)
+			}
+		}
+		if len(result) > 0 {
+			return result, nil
+		}
+		fmt.Fprintln(p.out, "Choose at least one app to continue.")
+	}
+}
+func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time, userHomes ...string) ([]archive.ProjectActivation, error) {
+	result := []archive.ProjectActivation{}
+	seen := map[string]bool{}
+	for _, project := range existing {
+		if !project.Included {
+			continue
+		}
+		keep, err := p.yesNo("Keep project "+project.Root+"?", true)
+		if err != nil {
+			return nil, err
+		}
+		if keep {
+			result = append(result, project)
+			seen[project.Root] = true
+		}
+	}
+	fmt.Fprintln(p.out, "Add project directories, one per line. Enter a blank line when finished.")
+	for {
+		root, err := p.line("Project path: ")
+		if err != nil {
+			return nil, err
+		}
+		if root == "" {
+			break
+		}
+		if root == "~" || strings.HasPrefix(root, "~/") {
+			home, e := os.UserHomeDir()
+			if len(userHomes) > 0 {
+				home = userHomes[0]
+				e = nil
+			}
+			if e != nil {
+				return nil, e
+			}
+			root = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(root, "~"), "/"))
+		}
+		root, err = filepath.Abs(root)
+		if err == nil {
+			root, err = filepath.EvalSymlinks(root)
+		}
+		if err != nil {
+			fmt.Fprintln(p.out, "That directory does not exist. Enter an existing project path.")
+			continue
+		}
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			fmt.Fprintln(p.out, "Enter a directory, not a file.")
+			continue
+		}
+		if seen[root] {
+			fmt.Fprintln(p.out, "That project is already included.")
+			continue
+		}
+		seen[root] = true
+		project := archive.ProjectActivation{ProjectID: archive.ProjectID(root), Root: root, Included: true, ActivatedAt: now}
+		for _, old := range existing {
+			if old.Root == root {
+				project.ActivatedAt = old.ActivatedAt
+			}
+		}
+		result = append(result, project)
+	}
+	return result, nil
+}
 func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
+	for _, value := range values {
+		if value != "" {
+			return value
 		}
 	}
 	return ""
 }
-
-// promptHarnesses asks once per supported application, defaulting to
-// whichever were detected or already included.
-func promptHarnesses(p *prompter, detected, existing []string) ([]string, error) {
-	var included []string
-	for _, h := range allHarnesses {
-		def := containsString(detected, h) || containsString(existing, h)
-		include, err := p.yesNo(fmt.Sprintf("Include %s?", harnessDisplayName(h)), def)
-		if err != nil {
-			return nil, err
-		}
-		if include {
-			included = append(included, h)
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
 		}
 	}
-	return included, nil
+	return false
 }
-
-// harnessDisplayName maps an internal harness name to what its users call it.
-func harnessDisplayName(h string) string {
-	switch h {
+func appName(app string) string {
+	switch app {
 	case "codex":
 		return "Codex"
 	case "claude":
@@ -440,89 +565,30 @@ func harnessDisplayName(h string) string {
 	case "cursor":
 		return "Cursor"
 	}
-	return h
+	return app
+}
+func friendlyApps(apps []string) string {
+	if len(apps) == 0 {
+		return "none"
+	}
+	names := []string{}
+	for _, a := range apps {
+		names = append(names, appName(a))
+	}
+	return strings.Join(names, ", ")
 }
 
-func harnessDisplayNames(hs []string) []string {
-	out := make([]string, 0, len(hs))
-	for _, h := range hs {
-		out = append(out, harnessDisplayName(h))
-	}
-	return out
-}
-
-// normalizeProjectRoot expands a leading ~ (against userHome, the same
-// directory setup uses for hook files) and resolves symlinks, so the stored
-// root matches the real working directory a hook later reports: Eligible
-// and ProjectID compare lexically and leave symlink resolution to their
-// caller. It rejects relative paths, which would depend on where setup was
-// run and silently never match anything. It reports whether the directory
-// exists yet so the caller can warn about a likely typo without refusing a
-// project that is about to be cloned.
-func normalizeProjectRoot(root, userHome string) (resolved string, exists bool, err error) {
-	if root == "~" || strings.HasPrefix(root, "~/") {
-		root = filepath.Join(userHome, strings.TrimPrefix(root, "~"))
-	}
-	if !filepath.IsAbs(root) {
-		return "", false, fmt.Errorf("project directory %q must be an absolute path", root)
-	}
-	resolved, err = local.ResolveExistingSymlinks(root)
+func suggestedProject(dir string) string {
+	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", false, fmt.Errorf("project directory %q: %w", root, err)
+		return ""
 	}
-	info, statErr := os.Stat(resolved)
-	return resolved, statErr == nil && info.IsDir(), nil
-}
-
-func containsString(values []string, target string) bool {
-	for _, v := range values {
-		if v == target {
-			return true
+	for p := root; ; p = filepath.Dir(p) {
+		if _, err := os.Stat(filepath.Join(p, ".git")); err == nil {
+			return p
+		}
+		if filepath.Dir(p) == p {
+			return ""
 		}
 	}
-	return false
-}
-
-// promptProjects asks whether to keep each currently included project, then
-// collects new project roots to add. Kept projects retain their original
-// ActivatedAt, satisfying the spec's "reruns preserve existing activation
-// times"; added ones activate now.
-func promptProjects(p *prompter, existing []archive.ProjectActivation, now time.Time, userHome string) ([]archive.ProjectActivation, error) {
-	var kept []archive.ProjectActivation
-	seen := map[string]bool{}
-	for _, project := range existing {
-		if !project.Included {
-			continue
-		}
-		keep, err := p.yesNo(fmt.Sprintf("Keep project %s?", project.Root), true)
-		if err != nil {
-			return nil, err
-		}
-		if keep {
-			kept = append(kept, project)
-			seen[filepath.Clean(project.Root)] = true
-		}
-	}
-	added, err := p.lines("Add project directories (blank line to finish):")
-	if err != nil {
-		return nil, err
-	}
-	for _, entered := range added {
-		root, exists, err := normalizeProjectRoot(entered, userHome)
-		if err != nil {
-			return nil, err
-		}
-		if seen[root] {
-			fmt.Fprintf(p.out, "  %s is already included; skipping.\n", root)
-			continue
-		}
-		seen[root] = true
-		if !exists {
-			fmt.Fprintf(p.out, "  Note: %s does not exist yet; sessions there are captured once it does.\n", root)
-		}
-		kept = append(kept, archive.ProjectActivation{
-			ProjectID: archive.ProjectID(root), Root: root, Included: true, ActivatedAt: now,
-		})
-	}
-	return kept, nil
 }

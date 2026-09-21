@@ -1,9 +1,11 @@
 package local
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPrivateAtomicFile(t *testing.T) {
@@ -47,5 +49,22 @@ func TestHomeRejectsGitSymlink(t *testing.T) {
 	t.Setenv("AGENT_ARCHIVE_HOME", filepath.Join(root, "link", "private"))
 	if _, e := Home(); e == nil {
 		t.Fatal("allowed private data under Git via symlink")
+	}
+}
+
+func TestNamedLockWaitRespectsDeadline(t *testing.T) {
+	home := t.TempDir()
+	unlock, err := NamedLock(home, "hooks.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	start := time.Now()
+	_, err = NamedLockWait(home, "hooks.lock", 30*time.Millisecond)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("elapsed=%v", elapsed)
 	}
 }

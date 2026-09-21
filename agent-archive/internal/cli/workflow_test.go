@@ -52,7 +52,7 @@ func TestSyncEndToEndFromHookThroughPublish(t *testing.T) {
 	if code := runStatusCommand(nil, &stdout, &stderr, env); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Pending:        0") {
+	if !strings.Contains(stdout.String(), "Pending:       0") {
 		t.Fatalf("status did not reflect the publish: %s", stdout.String())
 	}
 }

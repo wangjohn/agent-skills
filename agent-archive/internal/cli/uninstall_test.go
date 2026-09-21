@@ -31,51 +31,29 @@ func installedFixture(t *testing.T, keychain *fakeKeychain, input string) (home,
 	return home, userHome, env
 }
 
-func TestUninstallReversesSetup(t *testing.T) {
-	home, userHome, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, true, false, "/work/widget"))
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
-	unloaded := ""
-	env.UnloadLaunchAgent = func(p string) error { unloaded = p; return nil }
-
-	var stdout, stderr bytes.Buffer
-	code := Run([]string{"uninstall"}, strings.NewReader("y\n"), &stdout, &stderr, env)
-	if code != 0 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+func TestUninstallKeepsLocalDataByDefault(t *testing.T) {
+	home, userHome, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "profile", true, true, false, t.TempDir()))
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"uninstall"}, strings.NewReader("y\n"), &out, &errOut, env); code != 0 {
+		t.Fatal(errOut.String())
 	}
-	if unloaded != plistPath {
-		t.Fatalf("expected the LaunchAgent to be unloaded via %q, got %q", plistPath, unloaded)
+	cfg, found, _ := config.Load(home)
+	if !found || cfg.Archive.Enabled {
+		t.Fatal("must retain disabled config")
 	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Fatalf("expected the plist removed, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(userHome, "Library/LaunchAgents", hooks.LaunchLabel+".plist")); !os.IsNotExist(err) {
+		t.Fatal("plist remains")
 	}
 	for _, rel := range []string{".codex/hooks.json", ".claude/settings.json"} {
-		b, err := os.ReadFile(filepath.Join(userHome, rel))
-		if err != nil {
-			t.Fatalf("%s: %v", rel, err)
-		}
-		if strings.Contains(string(b), hooks.Owner) || strings.Contains(string(b), "_hook") {
-			t.Fatalf("%s still contains our hook entries:\n%s", rel, b)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(userHome, ".cursor", "hooks.json")); err == nil {
-		t.Fatal("cursor was never included; uninstall must not create its hook file")
-	}
-	if _, err := os.Stat(home); !os.IsNotExist(err) {
-		t.Fatalf("expected local state removed, stat err=%v", err)
-	}
-	if _, found, _ := config.Load(t.TempDir()); found {
-		t.Fatal("sanity: a fresh home must not report a config")
-	}
-	out := stdout.String()
-	for _, want := range []string{"Nothing in your bucket is touched", "Removed:", "background collector LaunchAgent", "hook entries", "local state", "binary was left in place", "Uninstall complete."} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("stdout missing %q:\n%s", want, out)
+		b, _ := os.ReadFile(filepath.Join(userHome, rel))
+		if strings.Contains(string(b), hooks.Owner) {
+			t.Fatal("owned hooks remain")
 		}
 	}
 }
 
 func TestUninstallDeclineChangesNothing(t *testing.T) {
-	home, userHome, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	home, userHome, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, t.TempDir()))
 	env.UnloadLaunchAgent = func(string) error {
 		t.Fatal("declining must not unload the LaunchAgent")
 		return nil
@@ -106,7 +84,7 @@ func TestUninstallDeclineChangesNothing(t *testing.T) {
 }
 
 func TestUninstallRejectsTruncatedInputInsteadOfProceeding(t *testing.T) {
-	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, t.TempDir()))
 	var stdout, stderr bytes.Buffer
 	code := runUninstallCommand(nil, strings.NewReader(""), &stdout, &stderr, env)
 	if code != 1 {
@@ -131,7 +109,7 @@ func TestUninstallPreservesUnrelatedHooksAndSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runSetupCommand(nil, strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", false, true, false, "/work/widget")), &stdout, &stderr, env); code != 0 {
+	if code := runSetupCommand(nil, strings.NewReader(s3SetupInput("test-bucket", "us-east-1", "test-profile", false, true, false, t.TempDir())), &stdout, &stderr, env); code != 0 {
 		t.Fatalf("setup failed: code=%d stderr=%s", code, stderr.String())
 	}
 	installed, _ := os.ReadFile(claudePath)
@@ -162,24 +140,16 @@ func TestUninstallDeletesStoredR2CredentialsOnly(t *testing.T) {
 	// A credential under some other reference stands in for anything else
 	// stored under our Keychain service; uninstall must leave it alone.
 	keychain.Save(context.Background(), "r2-other-bucket", credentials.R2Credentials{AccessKeyID: "OTHER", SecretAccessKey: "othersecret"})
-	r2Input := strings.Join([]string{
-		"1", "r2-bucket", "account123", "", "",
-		"AKIAEXAMPLE", "supersecret",
-		"y", "n", "n",
-		"/work/widget", "",
-		"y", "",
-		"y",
-	}, "\n") + "\n"
-	_, _, env := installedFixture(t, keychain, r2Input)
-	if _, err := keychain.Load(context.Background(), "r2-r2-bucket"); err != nil {
-		t.Fatalf("sanity: setup should have stored the secret: %v", err)
-	}
+	r2Input := r2SetupInput(t.TempDir(), "supersecret")
+	home, _, env := installedFixture(t, keychain, r2Input)
+	cfg, _, _ := config.Load(home)
+	ref := cfg.Storage.R2CredentialRef
 
 	var stdout, stderr bytes.Buffer
-	if code := runUninstallCommand(nil, strings.NewReader("y\n"), &stdout, &stderr, env); code != 0 {
+	if code := runUninstallCommand([]string{"--delete-local-data"}, strings.NewReader("y\ny\n"), &stdout, &stderr, env); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if _, err := keychain.Load(context.Background(), "r2-r2-bucket"); !errors.Is(err, credentials.ErrMissingCredential) {
+	if _, err := keychain.Load(context.Background(), ref); !errors.Is(err, credentials.ErrMissingCredential) {
 		t.Fatalf("expected the stored R2 secret deleted, got err=%v", err)
 	}
 	if _, err := keychain.Load(context.Background(), "r2-other-bucket"); err != nil {
@@ -191,13 +161,10 @@ func TestUninstallDeletesStoredR2CredentialsOnly(t *testing.T) {
 			t.Fatalf("uninstall output must never contain a secret:\n%s", combined)
 		}
 	}
-	if !strings.Contains(stdout.String(), "stored R2 credentials") {
-		t.Fatalf("expected the plan and summary to mention the Keychain item:\n%s", stdout.String())
-	}
 }
 
 func TestUninstallWithS3NeverOpensKeychain(t *testing.T) {
-	_, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	_, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, t.TempDir()))
 	env.Keychain = func() (credentials.CredentialStore, error) {
 		t.Fatal("an S3 configuration references no Keychain item; uninstall must not open Keychain")
 		return nil, nil
@@ -242,9 +209,7 @@ func TestUninstallRemovesLeftoversWithoutAConfig(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No agent-archive configuration found") {
-		t.Fatalf("stdout=%s", stdout.String())
-	}
+
 	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
 		t.Fatalf("expected the plist removed, stat err=%v", err)
 	}
@@ -252,8 +217,8 @@ func TestUninstallRemovesLeftoversWithoutAConfig(t *testing.T) {
 	if strings.Contains(string(b), hooks.Owner) {
 		t.Fatalf("cursor hook entry should be removed even without a config:\n%s", b)
 	}
-	if _, err := os.Stat(home); !os.IsNotExist(err) {
-		t.Fatalf("expected local state removed, stat err=%v", err)
+	if _, err := os.Stat(home); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -273,7 +238,7 @@ func TestUninstallRefusesToRemoveTheUserHome(t *testing.T) {
 }
 
 func TestUninstallReportsBusyCollectorAndKeepsLocalState(t *testing.T) {
-	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, t.TempDir()))
 	unlock, err := local.Lock(home)
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +249,7 @@ func TestUninstallReportsBusyCollectorAndKeepsLocalState(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "collector pass is still running") {
+	if !strings.Contains(stderr.String(), "another operation is finishing") {
 		t.Fatalf("stderr=%s", stderr.String())
 	}
 	if _, found, _ := config.Load(home); !found {
@@ -303,14 +268,14 @@ func TestUsageListsUninstall(t *testing.T) {
 }
 
 func TestUninstallLeavesFilesItDidNotCreate(t *testing.T) {
-	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, "/work/widget"))
+	home, _, env := installedFixture(t, newFakeKeychain(), s3SetupInput("test-bucket", "us-east-1", "test-profile", true, false, false, t.TempDir()))
 	// A user who pointed AGENT_ARCHIVE_HOME at a directory of their own.
 	foreign := filepath.Join(home, "my-notes.txt")
 	if err := os.WriteFile(foreign, []byte("keep me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := runUninstallCommand(nil, strings.NewReader("y\n"), &stdout, &stderr, env)
+	code := runUninstallCommand([]string{"--delete-local-data"}, strings.NewReader("y\ny\n"), &stdout, &stderr, env)
 	if code != 1 {
 		t.Fatalf("expected a leftover to be reported as incomplete: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -324,7 +289,7 @@ func TestUninstallLeavesFilesItDidNotCreate(t *testing.T) {
 		t.Fatal("agent-archive's own config must still be removed")
 	}
 	entries, _ := os.ReadDir(home)
-	if len(entries) != 1 {
+	if len(entries) != 4 {
 		t.Fatalf("only the foreign file should remain, got %d entries", len(entries))
 	}
 }

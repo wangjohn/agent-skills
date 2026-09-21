@@ -19,6 +19,7 @@ import (
 
 // Options configures one Sweep call.
 type Options struct {
+	AcceptSession func(archive.SessionRegistration) bool
 	// Now returns the current time. Defaults to time.Now.
 	Now func() time.Time
 	// GracePeriod bounds how long a superseded (no longer current) source
@@ -66,6 +67,9 @@ func Sweep(ctx context.Context, local *collector.LocalStore, store storage.Objec
 		return Result{}, fmt.Errorf("load registrations: %w", err)
 	}
 	for _, reg := range registrations {
+		if opts.AcceptSession != nil && !opts.AcceptSession(reg) {
+			continue
+		}
 		if err := sweepSession(ctx, local, store, reg, opts, now, &result); err != nil {
 			result.Errors[reg.ArchiveSessionID] = err
 		}

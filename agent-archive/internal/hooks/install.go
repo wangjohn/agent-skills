@@ -1,11 +1,13 @@
 package hooks
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -184,4 +186,29 @@ func LaunchAgent(executable, dataHome string) ([]byte, error) {
 <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
 `, LaunchLabel, escape(executable), escape(dataHome), escape(filepath.Join(dataHome, "collector.log")), escape(filepath.Join(dataHome, "collector-error.log")))), nil
+}
+
+// Installed checks the complete expected configuration without changing it.
+// JSON formatting and object key order do not affect the result.
+func Installed(home, executable, harness string) (bool, error) {
+	changes, err := Plan(home, executable, []string{harness})
+	if err != nil {
+		return false, err
+	}
+	for _, c := range changes {
+		if !c.Existed {
+			return false, nil
+		}
+		var before, after any
+		if err := json.Unmarshal(c.Before, &before); err != nil {
+			return false, err
+		}
+		if err := json.Unmarshal(c.After, &after); err != nil {
+			return false, err
+		}
+		if !reflect.DeepEqual(before, after) {
+			return false, nil
+		}
+	}
+	return true, nil
 }

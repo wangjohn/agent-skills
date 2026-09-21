@@ -17,6 +17,7 @@ import (
 // local.Lock(home) around Run; Run itself does not acquire it, so it stays
 // simple to call directly from tests.
 type Options struct {
+	AcceptSession func(archive.SessionRegistration) bool
 	// MachineID identifies this machine in published metadata. Required.
 	MachineID string
 	// Now returns the current time. Defaults to time.Now; tests override it
@@ -88,9 +89,15 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 	result := Result{Errors: map[string]error{}}
 	pending := 0
 	for _, reg := range registrations {
+		if opts.AcceptSession != nil && !opts.AcceptSession(reg) {
+			continue
+		}
 		result.Scanned++
 		req := requestsByID[reg.ArchiveSessionID]
 
+		if err := local.SetScanPending(reg.ArchiveSessionID, true); err != nil {
+			return result, fmt.Errorf("journal pending scan: %w", err)
+		}
 		outcome, err := processSession(ctx, local, store, reg, req, now, opts)
 		if err != nil {
 			result.Errors[reg.ArchiveSessionID] = err
@@ -108,15 +115,27 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 				continue
 			}
 		}
+		if outcome != outcomeRateLimited {
+			if err := local.SetScanPending(reg.ArchiveSessionID, false); err != nil {
+				return result, fmt.Errorf("complete pending scan: %w", err)
+			}
+		}
 		switch outcome {
 		case outcomePublished:
 			result.Published = append(result.Published, reg.ArchiveSessionID)
-		case outcomeSkipped, outcomeRateLimited:
+		case outcomeRateLimited:
+			pending++
+			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
+		case outcomeSkipped:
 			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
 		}
 	}
 
-	status := Status{LastScanAt: now.UTC(), PendingCount: pending}
+	previousStatus, err := local.LoadStatus()
+	if err != nil {
+		return result, err
+	}
+	status := Status{LastScanAt: now.UTC(), PendingCount: pending, LastPublishedAt: previousStatus.LastPublishedAt}
 	if len(result.Published) > 0 {
 		status.LastPublishedAt = now.UTC()
 	}

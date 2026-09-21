@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 func ID() (string, error) {
@@ -18,7 +19,9 @@ func ID() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-func Home() (string, error) {
+func Home() (string, error)     { return resolveHome(true) }
+func ReadHome() (string, error) { return resolveHome(false) }
+func resolveHome(create bool) (string, error) {
 	path := os.Getenv("AGENT_ARCHIVE_HOME")
 	if path == "" {
 		home, e := os.UserHomeDir()
@@ -38,6 +41,9 @@ func Home() (string, error) {
 		if filepath.Dir(p) == p {
 			break
 		}
+	}
+	if !create {
+		return path, nil
 	}
 	if e = os.MkdirAll(path, 0700); e != nil {
 		return "", e
@@ -129,14 +135,35 @@ func Read(path string, value any) error {
 
 var ErrBusy = errors.New("another collector or setup is running")
 
-func Lock(home string) (func(), error) {
-	f, e := os.OpenFile(filepath.Join(home, "collector.lock"), os.O_CREATE|os.O_RDWR, 0600)
+func Lock(home string) (func(), error) { return NamedLock(home, "collector.lock") }
+
+func NamedLock(home, name string) (func(), error) {
+	f, e := os.OpenFile(filepath.Join(home, name), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return nil, e
 	}
 	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		f.Close()
-		return nil, ErrBusy
+		if errors.Is(e, syscall.EWOULDBLOCK) || errors.Is(e, syscall.EAGAIN) {
+			return nil, ErrBusy
+		}
+		return nil, e
 	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// NamedLockWait tolerates short contention while preserving the hook deadline.
+func NamedLockWait(home, name string, timeout time.Duration) (func(), error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		unlock, err := NamedLock(home, name)
+		if !errors.Is(err, ErrBusy) {
+			return unlock, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, err
+		}
+		time.Sleep(min(10*time.Millisecond, remaining))
+	}
 }

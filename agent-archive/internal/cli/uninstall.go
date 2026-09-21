@@ -15,178 +15,169 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 )
 
-// runUninstallCommand reverses what setup installed on this Mac: it stops
-// and removes the LaunchAgent, strips only our own handlers from each
-// included application's hook configuration, deletes the R2 secret setup
-// stored in Keychain (when the configuration references one), and finally
-// deletes the private data directory (config, per-session cache, logs).
-//
-// Nothing is touched until the user confirms the printed plan. Remote
-// objects in the bucket are never read, listed, or deleted: the archive
-// itself stays exactly where it is, and the binary is left in place for the
-// user to remove. Each step after confirmation is best-effort and
-// independent, so one failing does not stop the others from being tried;
-// the exit code reports whether everything succeeded.
-func runUninstallCommand(_ []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
-	ctx := context.Background()
+// Uninstall leaves data and credentials available for reinstall unless the
+// explicit destructive option and its separate confirmation are supplied.
+func runUninstallCommand(args []string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
+	if err := uninstall(args, stdin, stdout, env); err != nil {
+		fmt.Fprintf(stderr, "Uninstall incomplete: %v\n", err)
+		return 1
+	}
+	return 0
+}
+func uninstall(args []string, stdin io.Reader, out io.Writer, env Env) error {
 	home, err := env.home()
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: resolve home: %v\n", err)
-		return 1
+		return err
 	}
 	userHome, err := env.userHomeDir()
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: resolve user home: %v\n", err)
-		return 1
+		return err
 	}
-	if err := checkRemovableHome(home, userHome); err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: %v\n", err)
-		return 1
+	if err = checkRemovableHome(home, userHome); err != nil {
+		return err
+	}
+	if err = os.MkdirAll(home, 0700); err != nil {
+		return err
+	}
+	release, err := local.NamedLock(home, "setup.lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+	if transactionPending(home) {
+		return fmt.Errorf("run agent-archive setup to recover the interrupted installation first")
 	}
 	cfg, found, err := config.Load(home)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: load config: %v\n", err)
-		return 1
+		return err
 	}
-
-	// Which hook files to inspect. Without a config (setup never finished,
-	// or its rollback did not) every supported application is checked, which
-	// is safe because removal only ever strips our own marker entries.
-	harnesses := cfg.Harnesses
-	if !found || len(harnesses) == 0 {
-		harnesses = allHarnesses
-	}
-	hookChanges, err := hooks.PlanRemoval(userHome, harnesses)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: plan hook removal: %v\n", err)
-		return 1
-	}
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
-	plistExists := false
-	if _, err := os.Stat(plistPath); err == nil {
-		plistExists = true
-	} else if !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: check LaunchAgent: %v\n", err)
-		return 1
-	}
-	credentialRef := ""
-	if found && cfg.Storage.Provider == credentials.ProviderR2 {
-		credentialRef = cfg.Storage.R2CredentialRef
-	}
-
-	if !found {
-		fmt.Fprintln(stdout, "No agent-archive configuration found; removing any leftover pieces.")
-	}
-	fmt.Fprintln(stdout, "\nThis will remove:")
-	if plistExists {
-		fmt.Fprintf(stdout, "  - the background collector LaunchAgent (%s)\n", plistPath)
+	purge := containsString(args, "--delete-local-data")
+	fmt.Fprintln(out, "Remove the archive's hooks and background collector from this Mac. Remote archives are kept.")
+	if purge {
+		fmt.Fprintf(out, "Also delete owned local state and credentials under %s.\n", home)
 	} else {
-		fmt.Fprintln(stdout, "  - the background collector LaunchAgent (not installed)")
+		fmt.Fprintln(out, "Local evidence, settings, and credentials will be kept. Run setup to reinstall.")
 	}
-	if len(hookChanges) > 0 {
-		var paths []string
-		for _, c := range hookChanges {
-			paths = append(paths, c.Path)
-		}
-		fmt.Fprintf(stdout, "  - agent-archive's own hook entries from %s (unrelated hooks are kept)\n", strings.Join(paths, ", "))
-	} else {
-		fmt.Fprintln(stdout, "  - agent-archive's own hook entries (none installed)")
-	}
-	if credentialRef != "" {
-		fmt.Fprintf(stdout, "  - the stored R2 credentials in Keychain (%s / %s)\n", credentials.KeychainService, credentialRef)
-	}
-	fmt.Fprintf(stdout, "  - local state: config, per-session cache, and logs under %s\n", home)
-	fmt.Fprintln(stdout, "\nNothing in your bucket is touched: every archived session stays exactly where it is.")
-
-	p := newPrompter(stdin, stdout)
-	confirm, err := p.yesNo("\nRemove agent-archive from this Mac?", false)
+	p := newPrompter(stdin, out)
+	yes, err := p.yesNo("Remove integrations?", false)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: %v\n", err)
-		return 1
+		return err
 	}
-	if !confirm {
-		fmt.Fprintln(stdout, "Cancelled. No changes were made.")
-		return 0
+	if !yes {
+		fmt.Fprintln(out, "Cancelled. No changes were made.")
+		return nil
 	}
-
-	var removed, failed []string
-	fail := func(what string, err error) {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: %s: %v\n", what, err)
-		failed = append(failed, what)
-	}
-
-	// 1. Stop and remove the LaunchAgent first, so no further scheduled
-	// collection starts while the rest is being taken apart.
-	if plistExists {
-		if err := env.unloadLaunchAgent(plistPath); err != nil {
-			// Not fatal: the plist may simply not be loaded (setup's own load
-			// attempt failed, or a previous uninstall stopped partway).
-			fmt.Fprintf(stdout, "Warning: could not stop the background collector: %v\n", err)
+	previewPending := 0
+	if purge {
+		pending, e := pendingSessions(home, config.Config{})
+		if e != nil {
+			return e
 		}
-		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-			fail("remove LaunchAgent plist", err)
-		} else {
-			removed = append(removed, "background collector LaunchAgent")
-		}
-	}
-
-	// 2. Hooks: all-or-nothing across files. Apply refuses a file edited
-	// since the plan was made and rolls back any it already rewrote.
-	if len(hookChanges) > 0 {
-		if err := hooks.Apply(hookChanges); err != nil {
-			fail("remove hook entries", err)
-		} else {
-			removed = append(removed, "hook entries")
-		}
-	}
-
-	// 3. Keychain. Only the reference is ever printed, never the secret.
-	if credentialRef != "" {
-		keychain, err := env.keychain()
+		previewPending = pending
+		fmt.Fprintf(out, "%d pending session(s) and all owned local caches will be removed. Unpublished evidence cannot be recovered from the bucket.\n", pending)
+		yes, err = p.yesNo("Delete local data and stored credentials too?", false)
 		if err != nil {
-			fail("open Keychain", err)
-		} else if err := keychain.Delete(ctx, credentialRef); err != nil && !errors.Is(err, credentials.ErrMissingCredential) {
-			fail("delete stored R2 credentials", err)
-		} else {
-			removed = append(removed, "stored R2 credentials")
+			return err
+		}
+		if !yes {
+			fmt.Fprintln(out, "Cancelled. No changes were made.")
+			return nil
 		}
 	}
-
-	// 4. Local state. A collector pass still finishing (the LaunchAgent was
-	// only just unloaded) must not have its directory deleted underneath it.
 	unlock, err := local.Lock(home)
 	if err != nil {
-		if errors.Is(err, local.ErrBusy) {
-			err = errors.New("a collector pass is still running; wait a moment and run `agent-archive uninstall` again to remove local state")
+		return fmt.Errorf("another operation is finishing; retry uninstall: %w", err)
+	}
+	defer unlock()
+	releaseHooks, err := local.NamedLock(home, "hooks.lock")
+	if err != nil {
+		return err
+	}
+	defer releaseHooks()
+	// Reload after acquiring the lock; pause/resume may have completed meanwhile.
+	cfg, found, err = config.Load(home)
+	if err != nil {
+		return err
+	}
+	if purge {
+		pending, e := pendingSessions(home, config.Config{})
+		if e != nil {
+			return e
 		}
-		fail("remove local state", err)
-	} else {
-		leftover, removeErr := removeLocalState(home)
-		unlock()
-		if removeErr != nil {
-			fail("remove local state", removeErr)
-		} else if len(leftover) > 0 {
-			fail("remove local state", fmt.Errorf("%s still contains entries agent-archive did not create (%s); remove it yourself once you have checked them", home, strings.Join(leftover, ", ")))
-		} else {
-			removed = append(removed, "local state ("+home+")")
+		if pending > previewPending {
+			return fmt.Errorf("new pending evidence appeared while confirming; rerun uninstall to review it")
 		}
 	}
-
-	fmt.Fprintln(stdout)
-	if len(removed) > 0 {
-		fmt.Fprintf(stdout, "Removed: %s.\n", strings.Join(removed, "; "))
-	} else {
-		fmt.Fprintln(stdout, "Nothing was removed.")
+	changes, err := hooks.PlanRemoval(userHome, allHarnesses)
+	if err != nil {
+		return err
 	}
-	if executable, err := env.executable(); err == nil {
-		fmt.Fprintf(stdout, "The agent-archive binary was left in place at %s; delete it yourself if you no longer want it.\n", executable)
+	plist := filepath.Join(userHome, "Library", "LaunchAgents", hooks.LaunchLabel+".plist")
+	state := env.jobState(plist)
+	if state == "unknown" {
+		return fmt.Errorf("cannot determine background job state; restore access to launchctl and retry")
 	}
-	if len(failed) > 0 {
-		fmt.Fprintf(stderr, "agent-archive: uninstall: could not complete: %s. See agent-archive/docs/install.md for the manual steps.\n", strings.Join(failed, "; "))
-		return 1
+	if state == "running" || state == "loaded" {
+		if err = env.unloadLaunchAgent(plist); err != nil {
+			return fmt.Errorf("stop collector: %w", err)
+		}
 	}
-	fmt.Fprintln(stdout, "Uninstall complete.")
-	return 0
+	// Disable capture before removing hooks. A partial uninstall remains safely disabled.
+	if found {
+		cfg.Archive.Enabled = false
+		if err = config.Save(home, cfg); err != nil {
+			return err
+		}
+	}
+	if err = hooks.Apply(changes); err != nil {
+		return err
+	}
+	if err = os.Remove(plist); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if purge {
+		refs := map[string]bool{}
+		for _, ref := range cfg.RetiredCredentialRefs {
+			refs[ref] = true
+		}
+		if cfg.Storage.R2CredentialRef != "" {
+			refs[cfg.Storage.R2CredentialRef] = true
+		}
+		for _, old := range cfg.PreviousDestinations {
+			if old.R2CredentialRef != "" {
+				refs[old.R2CredentialRef] = true
+			}
+		}
+		var draft setupDraft
+		if e := local.Read(filepath.Join(home, "setup-draft.json"), &draft); e == nil && draft.CredentialRef != "" {
+			refs[draft.CredentialRef] = true
+			for _, ref := range draft.StagedRefs {
+				refs[ref] = true
+			}
+		} else if e != nil && !os.IsNotExist(e) {
+			return e
+		}
+		if len(refs) > 0 {
+			kc, e := env.keychain()
+			if e != nil {
+				return e
+			}
+			for ref := range refs {
+				if e = kc.Delete(context.Background(), ref); e != nil && !errors.Is(e, credentials.ErrMissingCredential) {
+					return e
+				}
+			}
+		}
+		leftovers, e := removeLocalState(home)
+		if e != nil {
+			return e
+		}
+		if len(leftovers) > 0 {
+			return fmt.Errorf("unrelated files were kept in %s: %s", home, strings.Join(leftovers, ", "))
+		}
+	}
+	fmt.Fprintln(out, "Uninstall complete. Remote archives and the CLI executable were kept.")
+	return nil
 }
 
 // checkRemovableHome refuses to touch a data directory that is obviously
@@ -208,8 +199,8 @@ func checkRemovableHome(home, userHome string) error {
 // with those packages; an entry missing here is left behind by uninstall
 // (and reported), never silently deleted.
 var localStateEntries = []string{
-	"config.json",
-	"registrations", "requests", "published", "sessions", "superseded",
+	"config.json", "setup-draft.json", "setup-transaction.json",
+	"registrations", "requests", "published", "sessions", "superseded", "pending-scans",
 	"status.json",
 	"collector.lock", "collector.log", "collector-error.log",
 }
@@ -234,6 +225,9 @@ func removeLocalState(home string) (leftover []string, err error) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if name == "setup.lock" || name == "hooks.lock" || name == "collector.lock" {
+			continue
+		}
 		if !known[name] && !strings.HasPrefix(name, ".pending-") {
 			leftover = append(leftover, name)
 			continue
@@ -245,5 +239,6 @@ func removeLocalState(home string) (leftover []string, err error) {
 	if len(leftover) > 0 {
 		return leftover, nil
 	}
-	return nil, os.Remove(home)
+	// Lock files remain to avoid replacing an inode still locked by another process.
+	return nil, nil
 }

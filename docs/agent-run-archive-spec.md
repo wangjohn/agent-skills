@@ -35,21 +35,22 @@ Support `--help` and `--version`. Keep background-worker and hook entry points i
 
 ### Setup on each Mac
 
-The onboarding sequence is download → connect storage → select applications/projects → review and enable → verify real capture.
+The onboarding sequence is download → select applications/projects → connect storage → review and enable → verify real capture.
 
-```text
-$ agent-archive setup
+The implemented CLI refinement is described in [the setup and CLI plan](agent-archive-cli-plan.md). Setup saves non-secret drafts between completed steps, offers focused edits on rerun, and finishes configuration while app verification is pending. Command help is side-effect-free. Status supports human-readable and versioned JSON output. Uninstall keeps local evidence and credentials unless `--delete-local-data` is explicitly confirmed.
 
-Where should sessions be stored?
-  Cloudflare R2
-  Amazon S3
-```
+The three user-facing steps are choose apps and projects, connect storage, and
+review. Detected apps are offered together; declining opens individual choices.
+The current Git project is offered with its full path and explicit confirmation.
+Optional settings are available through `edit` at the final summary.
+
+The following requirements describe each part of setup and subsequent verification.
 
 **1. Connect an existing bucket.** Do not create infrastructure or require account-administration permissions in the initial release. Offer provider documentation if the user has not created a bucket yet.
 
 For R2, collect bucket name, the S3 endpoint supplied by Cloudflare, optional prefix (default `agent-archive/`), access key ID, and a hidden secret access key. Use region `auto`. Store credentials in macOS Keychain; configuration contains only their reference. Never accept secrets through command-line arguments, print them, or write them to shell history or project files.
 
-For S3, collect bucket name, region, optional prefix, and an existing AWS profile. Use the selected SDK's supported AWS credential providers, including IAM Identity Center where available. Store the profile reference rather than copying credentials. Honor an explicitly selected profile deterministically; do not silently use an unrelated environment credential. Explain how to configure an AWS profile if none exists.
+For S3, collect bucket name and an existing AWS profile. Offer locally configured profiles and infer the selected profile's region; ask for a region only when missing. Keep the optional prefix and region override in the final review's Edit menu. Use the selected SDK's supported AWS credential providers, including IAM Identity Center where available. Store the profile reference rather than copying credentials. Honor an explicitly selected profile deterministically; do not silently use an unrelated environment credential. Explain how to configure an AWS profile if none exists.
 
 Use separate credentials per Mac scoped to the intended bucket/prefix where supported. Existing credentials must cover upload, read, listing, and deletion for retention cleanup. An AWS bucket using additional controls such as customer-managed encryption may need extra permissions; surface the actual failure rather than requiring broad permissions by default.
 
@@ -78,11 +79,11 @@ Retention is configurable and explicitly accepted during setup before any cleanu
 ```text
 Storage:       R2 / personal-agent-archive / agent-archive/
 Applications:  Codex, Claude Code
-Projects:      2 included
+Project:       /Users/example/work/project
 History:       New sessions only
 Retention:     90 days
 
-Enable automatic capture? [Y/n]
+Start archiving? [Y/n/edit]
 ```
 
 Merge only owned lifecycle hooks, preserve unrelated handlers, and guide the user through each application's required trust flow. Install a macOS LaunchAgent that starts at login and schedules the collector. Store runtime files outside project repositories. Do not mark hooks as trusted automatically.

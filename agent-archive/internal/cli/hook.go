@@ -5,12 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 )
 
 // runHookCommand implements the hidden `_hook` entry point hooks.Merge
@@ -99,6 +101,18 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 	if kind == hookEventIgnored {
 		return nil
 	}
+	if transactionPending(home) {
+		return nil
+	}
+	unlock, lockErr := local.NamedLockWait(home, "hooks.lock", time.Second)
+	if lockErr != nil {
+		return fmt.Errorf("capture registration busy; this hook was not recorded: %w", lockErr)
+	}
+	defer unlock()
+	// Setup may have started while this hook was waiting for the lock.
+	if transactionPending(home) {
+		return nil
+	}
 	cfg, found, err := config.Load(home)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -127,6 +141,14 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
 	transcriptPath, _ := payload["transcript_path"].(string)
 	root := projectRoot(payload)
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		for _, project := range cfg.Archive.Projects {
+			if configured, err := filepath.EvalSymlinks(project.Root); err == nil && configured == resolved {
+				root = project.Root
+				break
+			}
+		}
+	}
 
 	existingID, found, err := store.ArchiveSessionID(nativeSessionID)
 	if err != nil {
@@ -144,6 +166,9 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		} else {
 			// A continuation of a session we already registered: keep its
 			// original start time and just refresh what may have changed.
+			if !cfg.AcceptSession(existing) {
+				return nil
+			}
 			existing.TranscriptPath = transcriptPath
 			existing.RegisteredAt = now
 			return store.SaveRegistration(existing)

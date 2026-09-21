@@ -60,10 +60,89 @@ Macs are supported.
    agent-archive setup
    ```
 
-   This walks through choosing storage (R2 or S3), which coding
-   agents to capture from, and which project directories to activate. See
-   the [engineering specification](../../docs/agent-run-archive-spec.md)
-   for what each step does and why.
+   Setup has three steps: choose apps and projects, connect storage, then
+   review and start. You need an existing private R2 or S3 bucket. Type `help`
+   at the storage prompt for provider instructions. Include each project explicitly. Only new sessions
+   are captured; historical conversations are not imported.
+
+   Setup offers the apps it finds together: “Include Codex and Claude Code?”
+   Accept to continue, or decline to choose apps individually. If no apps are
+   found, it opens the individual choices immediately. On reconfiguration,
+   it offers to keep your existing selection.
+
+   If setup finds the current Git project, it shows its full path and asks
+   “Archive sessions in this project?” Accept to continue, or decline to
+   enter project paths yourself.
+
+   For R2, enter a bucket, account ID or S3 endpoint, and credentials. Secret
+   input is hidden on a terminal and stored in Keychain. For S3, enter the
+   bucket and choose an existing AWS profile. Setup offers profiles from your
+   AWS settings and uses the selected profile's region when available. It
+   asks for a region only when one is missing.
+
+   The final summary shows the apps, projects, destination, session scope,
+   and automatic deletion period. At “Start archiving? [Y/n/edit]”, choose
+   `edit` to adjust apps, projects, session scope, retention, storage, the
+   folder inside the bucket, or the AWS region. Ordinary setup has no
+   advanced-settings questions. Storage changes are checked again before
+   starting; editing other choices does not repeat the connection test.
+   If the connection test fails, choose `edit` to correct the region, bucket
+   folder, or other settings, or `retry` after restoring access.
+
+   Review the exact project paths and retention period before enabling.
+   The default is 90 days; older sessions are deleted automatically.
+   Filtering is best effort, so archived text can still contain sensitive
+   information. The storage test uses only a temporary synthetic object;
+   it does not prove that the bucket is private.
+
+   Setup saves non-secret choices after each completed step. On interruption,
+   run it again to continue or start over. Staged R2 credentials have separate
+   Keychain references, so a working installation keeps its old credentials.
+   Reconfiguration lets you edit capture, storage, or retention separately.
+   Setup preserves the machine identity, existing project activation times,
+   paused state, and unrelated hooks.
+
+   After installation, approve the hooks in each selected app (Codex CLI:
+   `/hooks`), then start a harmless new session in an included project.
+   Setup finishes without waiting for that session. Check progress with:
+
+   ```sh
+   agent-archive status
+   agent-archive status --json
+   ```
+
+   Status distinguishes waiting for a session, observed hooks, local capture,
+   and published sources with verified checksums. Background `loaded` means
+   launchd knows the scheduled job; `running` means a pass is executing.
+   Configuration alone never establishes capture or trust. Status uses local
+   evidence and a read-only launchd check, without downloading conversations.
+
+## Routine use and recovery
+
+Run `agent-archive` for a short command guide, or `agent-archive COMMAND --help`
+for examples. Help never activates hooks, reads credentials, or changes state.
+Invalid flags fail before a command starts. Exit codes are 0 for success/help,
+1 for operational failure, and 2 for usage errors.
+
+- `sync` collects and uploads once, reporting results. It respects pause.
+- `pause` persists until `resume`. If work is still running, the command
+  reports that no settings changed and asks you to retry after it finishes.
+- Already registered sessions can catch up after resume, including activity
+  written during the pause. New sessions begun while paused are not imported.
+- A failed setup restores the previous config, hooks, and scheduler. If
+  recovery is incomplete, status says so; rerun setup to recover. It refuses
+  to overwrite a file edited outside setup during recovery.
+- A storage change is blocked while known work is pending. Sync the current
+  destination first. Switching starts a new capture boundary: old sessions
+  stay with their destination and stop being collected or cleaned up by this
+  Mac. Old destination references and local evidence are retained.
+- Reducing retention shows the affected locally owned session count and
+  cutoff before confirmation. The collector applies the resulting policy.
+
+The wizard accepts redirected input for controlled use, but its prompt sequence
+is not a scripting API. Supply secrets only through a private input stream;
+never use secret command arguments or commit input files. For a terminal,
+secret input fails rather than falling back to visible keystrokes.
 
 ## Inspecting what was archived
 
@@ -126,53 +205,34 @@ one-time Gatekeeper approval an unsigned binary needs.
 
 ## Uninstalling
 
-Run the built-in command:
-
 ```sh
 agent-archive uninstall
 ```
 
-It prints exactly what it is about to remove and asks for confirmation
-before touching anything. On confirmation it:
+After confirmation, uninstall stops the background collector, removes its
+LaunchAgent and owned hooks, and disables capture. It keeps local evidence,
+settings, and credentials so `agent-archive setup` can reinstall it. Unrelated
+hook handlers, remote archives, and the CLI executable are always kept.
 
-- stops and removes the background collector LaunchAgent
-  (`~/Library/LaunchAgents/com.agent-archive.collector.plist`);
-- removes only its own `agent-archive _hook ...` entries from each
-  included application's hook configuration (`~/.codex/hooks.json`,
-  `~/.claude/settings.json`, or `~/.cursor/hooks.json`), leaving every
-  unrelated hook and setting in place;
-- deletes the R2 credentials setup stored in Keychain, when the
-  configuration references them (an S3 setup stores none);
-- removes local state: config, per-session cache, and logs under
-  `~/.local/share/agent-archive` (or `$AGENT_ARCHIVE_HOME`). Only files
-  agent-archive itself created are deleted; anything else in that
-  directory is left in place and named in the output.
+To also delete owned local files and stored R2 credentials:
 
-Nothing in your bucket is read, listed, or deleted: every archived session
-stays exactly where it is. The binary itself is left in place; remove it
-with `rm /usr/local/bin/agent-archive` (or `rm /opt/homebrew/bin/agent-archive`,
-or wherever you put it).
-
-If the command cannot complete (for example, launchd is not reachable or a
-hook file was edited concurrently), it says which step failed and leaves the
-rest done. The same steps by hand, as a fallback:
 
 ```sh
-# Stop the background collector.
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.agent-archive.collector.plist
-rm ~/Library/LaunchAgents/com.agent-archive.collector.plist
-
-# Remove local state: config, per-session cache, logs.
-rm -rf ~/.local/share/agent-archive
-
-# Remove the binary.
-rm /usr/local/bin/agent-archive
+agent-archive uninstall --delete-local-data
 ```
 
-Then remove the `agent-archive _hook ...` entry (marked with the comment
-`agent-archive lifecycle capture`) from each included application's hook
-configuration, and delete the `agent-archive` item for your bucket from
-Keychain Access if you used R2. Without the LaunchAgent, a leftover `_hook`
-entry still records session bookkeeping under `~/.local/share/agent-archive`
-on every run, but nothing is ever published to remote storage — only
-`_collect`, which the LaunchAgent schedules, does that.
+This shows a pending-session count and requires a second confirmation.
+Unpublished evidence will be lost. Only known archive files are removed;
+unknown files are kept and reported. Small lock files remain to preserve process
+coordination. Neither mode reads or deletes remote archives.
+
+If another operation is finishing, wait and retry. If launchd is unavailable,
+or a hook file was edited concurrently, resolve the reported problem and rerun
+uninstall. Do not remove the data directory by hand while a collector is running.
+
+### Downgrading after changing storage
+
+After changing buckets or storage folders, do not downgrade to a version that
+does not support `DestinationSince`. Older versions ignore this saved boundary
+and may upload earlier sessions to the new destination. Keep the current version
+until a supported downgrade procedure is available.
