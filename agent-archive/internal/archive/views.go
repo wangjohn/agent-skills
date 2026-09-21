@@ -455,8 +455,13 @@ func deriveSkills(bundle SourceBundle, nativeSkillUses []SkillUse, metadata *Met
 	}
 	if len(metadata.SkillsUsed) > 0 {
 		metadata.SkillDetection = SkillDetectionObserved
-	} else if len(metadata.SkillsAvailable) > 0 {
-		metadata.SkillDetection = SkillDetectionObservedNone
+	} else {
+		for _, entry := range metadata.SkillsAvailable {
+			if entry.Coverage == SkillCoverageEligible || entry.Coverage == SkillCoverageDiscovered {
+				metadata.SkillDetection = SkillDetectionObservedNone
+				break
+			}
+		}
 	}
 	sort.Slice(metadata.SkillsAvailable, func(i, j int) bool {
 		return metadata.SkillsAvailable[i].Name+"\x00"+metadata.SkillsAvailable[i].SHA256 < metadata.SkillsAvailable[j].Name+"\x00"+metadata.SkillsAvailable[j].SHA256

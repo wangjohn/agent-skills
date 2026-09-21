@@ -52,6 +52,7 @@ const (
 	hookEventStart
 	hookEventStop
 	hookEventSubagentStop
+	hookEventResponse
 )
 
 // classifyHookEvent mirrors, per harness, exactly the event names
@@ -83,6 +84,8 @@ func classifyHookEvent(harness, eventName string) hookEventKind {
 		switch eventName {
 		case "sessionStart":
 			return hookEventStart
+		case "afterAgentResponse":
+			return hookEventResponse
 		case "stop", "sessionEnd":
 			return hookEventStop
 		case "subagentStop":
@@ -132,8 +135,8 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 	switch kind {
 	case hookEventStart:
 		return handleSessionStart(store, cfg, harness, nativeSessionID, payload, now)
-	case hookEventStop, hookEventSubagentStop:
-		return handleSessionStop(store, nativeSessionID, eventName, payload, now)
+	case hookEventStop, hookEventSubagentStop, hookEventResponse:
+		return handleSessionStop(store, harness, nativeSessionID, eventName, payload, now)
 	}
 	return nil
 }
@@ -171,7 +174,11 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 			}
 			existing.TranscriptPath = transcriptPath
 			existing.RegisteredAt = now
-			return store.SaveRegistration(existing)
+			applyHarnessObservation(&existing.Harness, harness, payload)
+			if err := store.SaveRegistration(existing); err != nil {
+				return err
+			}
+			return saveLifecycleEvidence(store, existing.ArchiveSessionID, harness, "sessionstart", payload, now)
 		}
 	}
 
@@ -206,17 +213,44 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 	if err != nil {
 		return fmt.Errorf("assign archive session ID: %w", err)
 	}
+	observedHarness := archive.Harness{Name: strings.ToLower(strings.TrimSpace(harness))}
+	applyHarnessObservation(&observedHarness, harness, payload)
 	reg := archive.SessionRegistration{
 		ArchiveSessionID: archiveID,
 		NativeSessionID:  nativeSessionID,
 		ProjectID:        archive.ProjectID(root),
 		ProjectRoot:      root,
-		Harness:          archive.Harness{Name: strings.ToLower(strings.TrimSpace(harness))},
+		Harness:          observedHarness,
 		TranscriptPath:   transcriptPath,
 		SessionStartedAt: now,
 		RegisteredAt:     now,
 	}
-	return store.SaveRegistration(reg)
+	if err := store.SaveRegistration(reg); err != nil {
+		return err
+	}
+	return saveLifecycleEvidence(store, archiveID, harness, "sessionstart", payload, now)
+}
+
+func applyHarnessObservation(target *archive.Harness, harness string, payload map[string]any) {
+	if target == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(harness), "cursor") {
+		if version := firstNonEmptyString(payload, "cursor_version"); version != "" {
+			target.Version = version
+		}
+		if mode := firstNonEmptyString(payload, "composer_mode"); mode != "" {
+			target.Mode = mode
+		}
+	}
+}
+
+func saveLifecycleEvidence(store *collector.LocalStore, archiveID, harness, reason string, payload map[string]any, now time.Time) error {
+	evidence, err := filteredHookEvidence(archive.EvidenceKindLifecycleHook, harness, reason, payload, false, now)
+	if err != nil || evidence == nil {
+		return err
+	}
+	return store.SaveRequest(archiveID, reason, now, *evidence)
 }
 
 // harnessReportsSessionSource reports whether the harness documents a
@@ -242,7 +276,7 @@ func sessionSourceContinuesEarlierConversation(source string) bool {
 	return false
 }
 
-func handleSessionStop(store *collector.LocalStore, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {
+func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {
 	archiveID, found, err := store.ArchiveSessionID(nativeSessionID)
 	if err != nil {
 		return fmt.Errorf("look up archive session ID: %w", err)
@@ -254,28 +288,71 @@ func handleSessionStop(store *collector.LocalStore, nativeSessionID, eventName s
 	}
 	reason := strings.ToLower(eventName)
 	var evidence []archive.SupplementalEvidence
-	if hookEvidencePayload := extractHookEvidencePayload(payload); len(hookEvidencePayload) > 0 {
-		evidence = append(evidence, archive.SupplementalEvidence{
-			Kind:       archive.EvidenceKindFinalResponse,
-			ObservedAt: now,
-			Provenance: "hook",
-			Payload:    hookEvidencePayload,
-		})
+	filtered, err := filteredHookEvidence(archive.EvidenceKindFinalResponse, harness, eventName, payload, true, now)
+	if err != nil {
+		return err
+	}
+	if filtered != nil {
+		evidence = append(evidence, *filtered)
 	}
 	return store.SaveRequest(archiveID, reason, now, evidence...)
 }
 
-// extractHookEvidencePayload passes through only the small set of
-// well-known optional fields a stop-type hook payload may carry. It never
-// fabricates a field that is not actually present.
-func extractHookEvidencePayload(payload map[string]any) map[string]any {
+// extractHookEvidencePayload passes through only documented or stable identity
+// fields. Cursor's generation_id is normalized to turn_id for reconciliation;
+// every other value remains exactly as observed.
+func extractHookEvidencePayload(payload map[string]any, includeFinalText bool) map[string]any {
 	out := map[string]any{}
 	for _, key := range []string{"message_id", "turn_id", "agent_id", "model", "model_id"} {
 		if value, ok := payload[key].(string); ok && value != "" {
 			out[key] = value
 		}
 	}
+	if out["turn_id"] == nil {
+		if generation := firstNonEmptyString(payload, "generation_id"); generation != "" {
+			out["turn_id"] = generation
+		}
+	}
+	if raw, ok := payload["model_params"].([]any); ok {
+		params := make([]any, 0, len(raw))
+		for _, item := range raw {
+			param, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, value := firstNonEmptyString(param, "id"), firstNonEmptyString(param, "value")
+			if id != "" && value != "" {
+				params = append(params, map[string]any{"id": id, "value": value})
+			}
+		}
+		if len(params) > 0 {
+			out["model_params"] = params
+		}
+	}
+	if includeFinalText {
+		if text := firstNonEmptyString(payload, "last_assistant_message", "text"); text != "" {
+			out["text"] = text
+		}
+	}
 	return out
+}
+
+func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event string, payload map[string]any, includeFinalText bool, now time.Time) (*archive.SupplementalEvidence, error) {
+	hookPayload := extractHookEvidencePayload(payload, includeFinalText)
+	if len(hookPayload) == 0 {
+		return nil, nil
+	}
+	candidate := archive.SupplementalEvidence{
+		Kind: kind, ObservedAt: now, Provenance: "hook:" + strings.ToLower(strings.TrimSpace(harness)) + ":" + strings.ToLower(event), Payload: hookPayload,
+	}
+	filtered, _, err := archive.FilterSupplementalEvidence([]archive.SupplementalEvidence{candidate})
+	if err != nil {
+		return nil, fmt.Errorf("filter hook evidence: %w", err)
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	return &filtered[0], nil
 }
 
 func firstNonEmptyString(payload map[string]any, keys ...string) string {

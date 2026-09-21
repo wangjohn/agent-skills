@@ -38,6 +38,7 @@ func TestClassifyHookEvent(t *testing.T) {
 		{"claude", "StopFailure", hookEventStop},
 		{"claude", "PreToolUse", hookEventIgnored},
 		{"cursor", "sessionStart", hookEventStart},
+		{"cursor", "afterAgentResponse", hookEventResponse},
 		{"cursor", "stop", hookEventStop},
 		{"cursor", "SessionStart", hookEventIgnored}, // wrong case for this harness
 	}
@@ -240,6 +241,60 @@ func TestHandleHookEventStopWritesRequestWithEvidence(t *testing.T) {
 	}
 	if len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Payload["turn_id"] != "t1" {
 		t.Fatalf("evidence=%#v", requests[0].HookEvidence)
+	}
+}
+
+func TestHandleHookEventCapturesSupportedFinalTextAfterFiltering(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
+		t.Fatal(err)
+	}
+	stop := map[string]any{"hook_event_name": "Stop", "session_id": "native-1", "turn_id": "t1", "model": "gpt-x", "last_assistant_message": "done token=synthetic-secret-value"}
+	if err := handleHookEvent(home, "codex", stop, start.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	requests, err := store.LoadRequests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final archive.SupplementalEvidence
+	for _, item := range requests[0].HookEvidence {
+		if item.Kind == archive.EvidenceKindFinalResponse {
+			final = item
+		}
+	}
+	if text, _ := final.Payload["text"].(string); strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("final evidence was not filtered before persistence: %#v", final)
+	}
+}
+
+func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	start := map[string]any{"hook_event_name": "sessionStart", "conversation_id": "native-1", "workspace_roots": []any{"/work/widget"}, "cursor_version": "1.7.2", "composer_mode": "agent", "model": "label", "model_id": "model-x", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}
+	if err := handleHookEvent(home, "cursor", start, now); err != nil {
+		t.Fatal(err)
+	}
+	response := map[string]any{"hook_event_name": "afterAgentResponse", "conversation_id": "native-1", "generation_id": "generation-1", "text": "finished", "model": "label", "model_id": "model-x", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}
+	if err := handleHookEvent(home, "cursor", response, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if len(regs) != 1 || regs[0].Harness.Version != "1.7.2" || regs[0].Harness.Mode != "agent" {
+		t.Fatalf("registration=%#v", regs)
+	}
+	requests, _ := store.LoadRequests()
+	if len(requests) != 1 || len(requests[0].HookEvidence) != 2 {
+		t.Fatalf("requests=%#v", requests)
+	}
+	final := requests[0].HookEvidence[1]
+	if final.Payload["text"] != "finished" || final.Payload["turn_id"] != "generation-1" || final.Payload["model_id"] != "model-x" {
+		t.Fatalf("final=%#v", final)
 	}
 }
 

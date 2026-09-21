@@ -163,6 +163,7 @@ var allowedKeys = map[string]bool{
 	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
 	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
+	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"skill":     true,
 	"file_path": true,
 }

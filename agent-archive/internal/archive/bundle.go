@@ -116,6 +116,96 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 	return out, gaps, nil
 }
 
+// MergeSupplementalEvidence combines observations without allowing the time
+// of a repeated background scan to manufacture a new source snapshot.
+// Inventory and instruction-snapshot observations are state: a fresh value
+// replaces the previous value for the same producer and logical subject, but
+// an identical value retains its original observation time. Other evidence
+// is event-shaped and remains append-only.
+func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []SupplementalEvidence {
+	out := append([]SupplementalEvidence(nil), previous...)
+	for _, candidate := range fresh {
+		if !replaceableObservation(candidate.Kind) {
+			duplicate := false
+			for _, existing := range out {
+				if supplementalEvidenceEqual(existing, candidate) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+			continue
+		}
+		if candidate.Kind == EvidenceKindSkillInventory {
+			out = pruneSupersededSkillSnapshots(out, candidate)
+		}
+		identity := supplementalIdentity(candidate)
+		replaced := false
+		for i := range out {
+			if !replaceableObservation(out[i].Kind) || supplementalIdentity(out[i]) != identity {
+				continue
+			}
+			if supplementalPayloadEqual(out[i].Payload, candidate.Payload) {
+				// Preserve the first observation time for unchanged state.
+				candidate.ObservedAt = out[i].ObservedAt
+			}
+			out[i] = candidate
+			replaced = true
+			break
+		}
+		if !replaced {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func supplementalEvidenceEqual(a, b SupplementalEvidence) bool {
+	return a.Kind == b.Kind && a.Provenance == b.Provenance && a.ObservedAt.Equal(b.ObservedAt) && supplementalPayloadEqual(a.Payload, b.Payload)
+}
+
+func pruneSupersededSkillSnapshots(in []SupplementalEvidence, inventory SupplementalEvidence) []SupplementalEvidence {
+	scope := firstString(inventory.Payload, "scope")
+	active := map[string]bool{}
+	if skills, ok := inventory.Payload["skills"].([]any); ok {
+		for _, raw := range skills {
+			if skill, ok := raw.(map[string]any); ok {
+				active[firstString(skill, "name")] = true
+			}
+		}
+	}
+	out := in[:0]
+	for _, existing := range in {
+		if existing.Kind == EvidenceKindSkillSnapshot && existing.Provenance == inventory.Provenance && firstString(existing.Payload, "scope") == scope && !active[firstString(existing.Payload, "name")] {
+			continue
+		}
+		out = append(out, existing)
+	}
+	return out
+}
+
+func replaceableObservation(kind SupplementalEvidenceKind) bool {
+	return kind == EvidenceKindSkillInventory || kind == EvidenceKindSkillSnapshot
+}
+
+func supplementalIdentity(e SupplementalEvidence) string {
+	identity := string(e.Kind) + "\x00" + e.Provenance
+	if e.Kind == EvidenceKindSkillSnapshot {
+		identity += "\x00" + firstString(e.Payload, "name") + "\x00" + firstString(e.Payload, "scope")
+	} else {
+		identity += "\x00" + firstString(e.Payload, "coverage") + "\x00" + firstString(e.Payload, "scope")
+	}
+	return identity
+}
+
+func supplementalPayloadEqual(a, b map[string]any) bool {
+	aJSON, aErr := json.Marshal(a)
+	bJSON, bErr := json.Marshal(b)
+	return aErr == nil && bErr == nil && bytes.Equal(aJSON, bJSON)
+}
+
 // BuildCompressedSource serializes a bundle canonically and uses gzip headers
 // that are independent of the wall clock and host platform.
 func BuildCompressedSource(bundle SourceBundle) (CompressedSource, error) {
