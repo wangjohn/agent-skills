@@ -33,7 +33,7 @@ Each skill is a directory whose name matches the `name` field in `SKILL.md`. Kee
 
 Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This repo is the portable source of truth.
 
-`review-pr` runs native code review and design review in separate contexts, then combines them into a human guide: change map, design decisions, proposed fixes, and coverage. It uses code-first explanations and supports design-only requests. Try: “Use review-pr to review PR <url>.”
+`review-pr` runs native code review and design review in separate contexts, then combines them into a human guide: a short summary, change map, design decisions, proposed fixes, and coverage. It uses code-first explanations and supports design-only requests. Try: “Use review-pr to review PR <url>.”
 
 ## Add a skill
 
