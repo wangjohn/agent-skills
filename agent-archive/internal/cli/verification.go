@@ -35,11 +35,32 @@ func configurationID(cfg config.Config) string {
 	// These fields contain references, never credentials. Pausing, retention,
 	// and unrelated historical settings do not invalidate capture verification.
 	data, _ := json.Marshal(struct {
-		Storage   any
-		Harnesses []string
-		Machine   string
-		Since     time.Time
-	}{cfg.Storage, cfg.Harnesses, cfg.MachineID, cfg.DestinationSince})
+		Storage            any
+		Harnesses          []string
+		Machine            string
+		Since              time.Time
+		CapabilityContract int
+	}{cfg.Storage, cfg.Harnesses, cfg.MachineID, cfg.DestinationSince, 1})
+	return storage.SHA256Hex(data)
+}
+
+func sessionVerificationConfigurationID(cfg config.Config, reg archive.SessionRegistration) string {
+	var activation time.Time
+	for _, project := range cfg.Archive.Projects {
+		if project.Included && project.Root == reg.ProjectRoot {
+			activation = project.ActivatedAt
+			break
+		}
+	}
+	data, _ := json.Marshal(struct {
+		Storage            any
+		Machine            string
+		DestinationSince   time.Time
+		Harness            string
+		ProjectRoot        string
+		ProjectActivatedAt time.Time
+		CapabilityContract int
+	}{cfg.Storage, cfg.MachineID, cfg.DestinationSince, reg.Harness.Name, reg.ProjectRoot, activation, 1})
 	return storage.SHA256Hex(data)
 }
 func verificationPath(home, id string) string {
@@ -95,7 +116,8 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 		if err != nil {
 			return err
 		}
-		if old.ConfigurationID == configurationID(cfg) && old.PublishedAt.Equal(at) && !old.VerifiedAt.IsZero() {
+		verificationConfigurationID := sessionVerificationConfigurationID(cfg, reg)
+		if old.ConfigurationID == verificationConfigurationID && old.PublishedAt.Equal(at) && !old.VerifiedAt.IsZero() {
 			continue
 		}
 		key, err := archive.MetadataObjectKey(reg.Harness.Name, reg.ArchiveSessionID)
@@ -117,7 +139,7 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 			_, err = reader.LoadSource(context.Background(), remote, metadata, reader.Limits{})
 		}
 		if err == nil {
-			err = local.Write(verificationPath(home, reg.ArchiveSessionID), verificationEvidence{configurationID(cfg), at, env.now().UTC(), metadata.SourceBundle.SHA256})
+			err = local.Write(verificationPath(home, reg.ArchiveSessionID), verificationEvidence{verificationConfigurationID, at, env.now().UTC(), metadata.SourceBundle.SHA256})
 		}
 		if err != nil {
 			if result.Errors == nil {

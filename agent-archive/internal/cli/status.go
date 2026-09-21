@@ -37,6 +37,7 @@ type appStatus struct {
 	VersionSupport          string               `json:"installed_version_support"`
 	Capabilities            captureCapabilities  `json:"capabilities"`
 	verifiedHarnessVersions []string
+	Projects                []projectCaptureStatus `json:"projects"`
 
 	Code            string    `json:"code"`
 	Hooks           string    `json:"hooks"`
@@ -44,6 +45,21 @@ type appStatus struct {
 	State           string    `json:"state"`
 	Sessions        int       `json:"sessions"`
 	LastPublishedAt time.Time `json:"last_published_at,omitempty"`
+}
+
+type projectCaptureStatus struct {
+	ProjectID         string    `json:"project_id"`
+	ProjectRoot       string    `json:"project_root"`
+	ActivatedAt       time.Time `json:"activated_at"`
+	Configured        bool      `json:"configured"`
+	HookObserved      bool      `json:"hook_observed"`
+	CapturedLocally   bool      `json:"captured_locally"`
+	Published         bool      `json:"published"`
+	ReadBackVerified  bool      `json:"read_back_verified"`
+	PublishedSessions int       `json:"published_sessions"`
+	VerifiedSessions  int       `json:"verified_sessions"`
+	VerificationState string    `json:"verification_state"`
+	VerifiedAt        time.Time `json:"verified_at,omitempty"`
 }
 type statusView struct {
 	ConfigurationID string        `json:"configuration_id,omitempty"`
@@ -95,6 +111,9 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		if app.Capabilities.FreshStart.State == "unavailable" {
 			fmt.Fprintf(stdout, "  Fresh-start capture: unavailable. %s\n", app.Capabilities.FreshStart.NextAction)
 		}
+		for _, pair := range app.Projects {
+			fmt.Fprintf(stdout, "  Project %s: %s.\n", pair.ProjectRoot, pair.VerificationState)
+		}
 		if !app.VerifiedAt.IsZero() {
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
 		}
@@ -128,7 +147,7 @@ func readStatus(env Env) (view statusView, err error) {
 			view.Apps[i].Code = statusCode(view.Apps[i].State)
 		}
 	}()
-	view = statusView{Version: 2, State: "Not set up", Privacy: "not_verified", Background: "unknown", Projects: []string{}, Apps: []appStatus{}, Next: "Run agent-archive setup to get started."}
+	view = statusView{Version: 3, State: "Not set up", Privacy: "not_verified", Background: "unknown", Projects: []string{}, Apps: []appStatus{}, Next: "Run agent-archive setup to get started."}
 	home, err := env.readHome()
 	if err != nil {
 		return view, err
@@ -189,12 +208,29 @@ func readStatus(env Env) (view statusView, err error) {
 	}
 	for _, name := range cfg.Harnesses {
 		app := appStatus{Name: name, State: "waiting for first session", Configured: true, Trust: "unknown", VerificationState: "not_verified"}
+		pairIndex := map[string]int{}
+		for _, project := range cfg.Archive.Projects {
+			if !project.Included {
+				continue
+			}
+			pairIndex[project.Root] = len(app.Projects)
+			app.Projects = append(app.Projects, projectCaptureStatus{
+				ProjectID: string(project.ProjectID), ProjectRoot: project.Root,
+				ActivatedAt: project.ActivatedAt, Configured: true, VerificationState: "not_verified",
+			})
+		}
 		for _, reg := range regs {
 			if reg.Harness.Name != name || !cfg.AcceptSession(reg) {
 				continue
 			}
+			pairPosition, pairFound := pairIndex[reg.ProjectRoot]
+			if !pairFound {
+				continue
+			}
+			pair := &app.Projects[pairPosition]
 			app.Sessions++
 			app.HookObserved = true
+			pair.HookObserved = true
 			if issue := view.Collector.SessionIssues[reg.ArchiveSessionID]; issue != "" {
 				app.CaptureGaps = append(app.CaptureGaps, archive.CaptureGap{Code: issue, Detail: "Last scan could not update this session; retained evidence was kept. Run agent-archive sync for the failure."})
 			}
@@ -210,6 +246,7 @@ func readStatus(env Env) (view statusView, err error) {
 			}
 			if found {
 				app.CapturedLocally = true
+				pair.CapturedLocally = true
 				app.CaptureGaps = append(app.CaptureGaps, bundle.Capture.Gaps...)
 				if version := bundle.Capture.AdapterVersion; version != "" && !containsString(app.AdapterVersions, version) {
 					app.AdapterVersions = append(app.AdapterVersions, version)
@@ -227,13 +264,19 @@ func readStatus(env Env) (view statusView, err error) {
 
 				app.Published = true
 				app.PublishedSessions++
+				pair.Published = true
+				pair.PublishedSessions++
 				app.State = "published; read-back pending"
 				verification, e := readVerification(home, reg.ArchiveSessionID)
 				if e != nil {
 					return view, e
 				}
-				if verification.ConfigurationID == view.ConfigurationID && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
+				if verification.ConfigurationID == sessionVerificationConfigurationID(cfg, reg) && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
 					app.VerifiedSessions++
+					pair.VerifiedSessions++
+					if verification.VerifiedAt.After(pair.VerifiedAt) {
+						pair.VerifiedAt = verification.VerifiedAt
+					}
 					app.VerificationState = "verified_at_recorded_time"
 					if verification.VerifiedAt.After(app.VerifiedAt) {
 						app.VerifiedAt = verification.VerifiedAt
@@ -250,7 +293,26 @@ func readStatus(env Env) (view statusView, err error) {
 				}
 			}
 		}
-		app.ReadBackVerified = app.PublishedSessions > 0 && app.VerifiedSessions == app.PublishedSessions
+		app.ReadBackVerified = len(app.Projects) > 0
+		for i := range app.Projects {
+			pair := &app.Projects[i]
+			pair.ReadBackVerified = pair.PublishedSessions > 0 && pair.VerifiedSessions == pair.PublishedSessions
+			switch {
+			case pair.ReadBackVerified:
+				pair.VerificationState = "verified_at_recorded_time"
+			case pair.Published:
+				pair.VerificationState = "incomplete"
+			case pair.CapturedLocally:
+				pair.VerificationState = "captured_local"
+			case pair.HookObserved:
+				pair.VerificationState = "hook_observed"
+			default:
+				pair.VerificationState = "not_verified"
+			}
+			if !pair.ReadBackVerified {
+				app.ReadBackVerified = false
+			}
+		}
 		if app.Published && !app.ReadBackVerified {
 			app.State = "published; read-back pending"
 			app.VerificationState = "incomplete"
@@ -295,10 +357,32 @@ func readStatus(env Env) (view statusView, err error) {
 	view.Background = env.jobState(plist)
 	view.State = "Ready"
 	view.Next = "Keep working. Run agent-archive list to inspect archived sessions."
+	if len(view.Apps) == 0 {
+		view.State = "Needs attention"
+		view.Next = "Run agent-archive setup and select at least one application."
+	} else if len(view.Projects) == 0 {
+		view.State = "Needs attention"
+		view.Next = "Run agent-archive setup and include at least one project."
+	}
 	for _, app := range view.Apps {
-		if app.LastPublishedAt.IsZero() {
+		for _, pair := range app.Projects {
+			if pair.ReadBackVerified {
+				continue
+			}
 			view.State = "Waiting for capture"
-			view.Next = "Review hook approval in " + appName(app.Name) + ", then start a new session in an included project."
+			switch {
+			case app.Capabilities.FreshStart.State == "unavailable" && !pair.HookObserved:
+				view.Next = app.Capabilities.FreshStart.NextAction
+			case pair.Published:
+				view.Next = "Run agent-archive sync to retry read-back verification for " + appName(app.Name) + " in " + pair.ProjectRoot + "."
+			case pair.HookObserved:
+				view.Next = "Run agent-archive sync to capture and publish the " + appName(app.Name) + " session in " + pair.ProjectRoot + "."
+			default:
+				view.Next = "Review hook approval in " + appName(app.Name) + ", then start a new session in " + pair.ProjectRoot + "."
+			}
+			break
+		}
+		if view.State == "Waiting for capture" {
 			break
 		}
 	}
