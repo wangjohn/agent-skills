@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
@@ -101,8 +102,28 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if err != nil {
 		storeErr := fmt.Errorf("open storage: %w", err)
 		recordPreflightError(localStore, storeErr)
+		_ = recordStorageHealth(home, cfg, env, quietOnBusy, "credentials_unavailable")
 		return collector.Result{}, storeErr
 	}
+	if quietOnBusy {
+		var prior storageHealth
+		healthErr := local.Read(filepath.Join(home, "storage-health.json"), &prior)
+		if healthErr != nil || prior.ConfigurationID != configurationID(cfg) || prior.Context != "background_collector" || prior.State != "verified" {
+			probeErr := storage.VerifyAccess(context.Background(), objectStore, "")
+			state := "verified"
+			if probeErr != nil {
+				state = storageFailureState(probeErr)
+			}
+			if err := recordStorageHealth(home, cfg, env, true, state); err != nil {
+				return collector.Result{}, err
+			}
+			if probeErr != nil {
+				recordPreflightError(localStore, fmt.Errorf("background storage access failed; restore credentials or connectivity and retry"))
+				return collector.Result{}, probeErr
+			}
+		}
+	}
+
 	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
 		MachineID:       cfg.MachineID,
 		AcceptSession:   cfg.AcceptSession,
@@ -111,6 +132,29 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	})
 	if err != nil {
 		return result, err
+	}
+
+	if err := verifyPublications(home, cfg, env, localStore, objectStore, &result); err != nil {
+		return result, err
+	}
+	health := "not_checked"
+	if len(result.Published) > 0 {
+		health = "verified"
+	}
+	for _, sessionErr := range result.Errors {
+		if state := storageFailureState(sessionErr); state != "storage_unavailable" {
+			health = state
+			break
+		}
+		health = "not_checked"
+	}
+	if health != "not_checked" {
+		if err := recordStorageHealth(home, cfg, env, quietOnBusy, health); err != nil {
+			return result, err
+		}
+	}
+	if len(result.Errors) > 0 {
+		recordPreflightError(localStore, fmt.Errorf("%d session(s) need capture, publication, or read-back verification", len(result.Errors)))
 	}
 
 	sweepResult, sweepErr := retention.Sweep(context.Background(), localStore, objectStore, retention.Options{

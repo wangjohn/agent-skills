@@ -8,12 +8,28 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 )
 
 type appStatus struct {
+	PublishedSessions int                  `json:"published_sessions"`
+	VerifiedSessions  int                  `json:"verified_sessions"`
+	Configured        bool                 `json:"configured"`
+	HookObserved      bool                 `json:"hook_observed"`
+	CapturedLocally   bool                 `json:"captured_locally"`
+	Published         bool                 `json:"published"`
+	ReadBackVerified  bool                 `json:"read_back_verified"`
+	VerifiedAt        time.Time            `json:"verified_at,omitempty"`
+	VerificationState string               `json:"verification_state"`
+	Trust             string               `json:"trust"`
+	HarnessVersions   []string             `json:"observed_harness_versions,omitempty"`
+	AdapterVersions   []string             `json:"observed_adapter_versions,omitempty"`
+	CaptureGaps       []archive.CaptureGap `json:"capture_gaps,omitempty"`
+
 	Code            string    `json:"code"`
 	Hooks           string    `json:"hooks"`
 	Name            string    `json:"name"`
@@ -22,6 +38,9 @@ type appStatus struct {
 	LastPublishedAt time.Time `json:"last_published_at,omitempty"`
 }
 type statusView struct {
+	ConfigurationID string        `json:"configuration_id,omitempty"`
+	Authentication  storageHealth `json:"authentication"`
+
 	Code              string           `json:"code"`
 	Version           int              `json:"schema_version"`
 	State             string           `json:"state"`
@@ -55,6 +74,7 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if view.Storage != "" {
 		fmt.Fprintf(stdout, "Storage:       %s\nAccess checked: %s (privacy not verified)\n", view.Storage, formatTimeOrNever(view.StorageVerifiedAt))
 	}
+	fmt.Fprintf(stdout, "Authentication: %s (checked %s; %s)\n", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt), view.Authentication.Context)
 	fmt.Fprintf(stdout, "Background:    %s\n", view.Background)
 	if view.Paused {
 		fmt.Fprintln(stdout, "Collection:    paused")
@@ -62,6 +82,12 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	fmt.Fprintf(stdout, "Projects:      %d included\nPending:       %d session(s)\nLast scan:     %s\nLast publish:  %s\n", len(view.Projects), view.Collector.PendingCount, formatTimeOrNever(view.Collector.LastScanAt), formatTimeOrNever(view.Collector.LastPublishedAt))
 	for _, app := range view.Apps {
 		fmt.Fprintf(stdout, "%s: %s (%d session(s)); hooks %s\n", appName(app.Name), app.State, app.Sessions, app.Hooks)
+		if !app.VerifiedAt.IsZero() {
+			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
+		}
+		if len(app.CaptureGaps) > 0 {
+			fmt.Fprintf(stdout, "  Capture gaps: %d; see status --json for details.\n", len(app.CaptureGaps))
+		}
 	}
 	if view.Collector.LastError != "" {
 		fmt.Fprintf(stdout, "Last error:    %s\n", view.Collector.LastError)
@@ -98,6 +124,17 @@ func readStatus(env Env) (view statusView, err error) {
 	}
 	view.Storage = fmt.Sprintf("%s / %s / %s", cfg.Storage.Provider, cfg.Storage.Bucket, cfg.Storage.Prefix)
 	view.StorageVerifiedAt = cfg.StorageVerifiedAt
+	view.ConfigurationID = configurationID(cfg)
+	view.Authentication.State = "unknown"
+	if err := local.Read(filepath.Join(home, "storage-health.json"), &view.Authentication); err != nil && !os.IsNotExist(err) {
+		return view, err
+	}
+	if view.Authentication.ConfigurationID != "" && view.Authentication.ConfigurationID != view.ConfigurationID {
+		view.Authentication.State = "stale_configuration"
+	}
+	if view.Authentication.State == "verified" && env.now().Sub(view.Authentication.CheckedAt) > 5*time.Minute {
+		view.Authentication.State = "stale"
+	}
 	view.Paused = cfg.Paused
 	for _, p := range cfg.Archive.Projects {
 		if p.Included {
@@ -121,28 +158,60 @@ func readStatus(env Env) (view statusView, err error) {
 		return view, err
 	}
 	for _, name := range cfg.Harnesses {
-		app := appStatus{Name: name, State: "waiting for first session"}
+		app := appStatus{Name: name, State: "waiting for first session", Configured: true, Trust: "unknown", VerificationState: "not_verified"}
 		for _, reg := range regs {
 			if reg.Harness.Name != name || !cfg.AcceptSession(reg) {
 				continue
 			}
 			app.Sessions++
+			app.HookObserved = true
+			if reg.Harness.Version != "" && !containsString(app.HarnessVersions, reg.Harness.Version) {
+				app.HarnessVersions = append(app.HarnessVersions, reg.Harness.Version)
+			}
 			if app.State == "waiting for first session" {
 				app.State = "hook observed; waiting for capture"
 			}
-			_, at, state, found, err := store.LoadPublished(reg.ArchiveSessionID)
+			bundle, at, state, found, err := store.LoadPublished(reg.ArchiveSessionID)
 			if err != nil {
 				return view, err
+			}
+			if found {
+				app.CapturedLocally = true
+				app.CaptureGaps = append(app.CaptureGaps, bundle.Capture.Gaps...)
+				if version := bundle.Capture.AdapterVersion; version != "" && !containsString(app.AdapterVersions, version) {
+					app.AdapterVersions = append(app.AdapterVersions, version)
+				}
 			}
 			if found && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
 			if state == collector.CacheStatusPublished || (state == collector.CacheStatusRateLimited && !at.IsZero()) {
-				app.State = "published; source verified"
+				app.Published = true
+				app.PublishedSessions++
+				app.State = "published; read-back pending"
+				verification, e := readVerification(home, reg.ArchiveSessionID)
+				if e != nil {
+					return view, e
+				}
+				if verification.ConfigurationID == view.ConfigurationID && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
+					app.VerifiedSessions++
+					app.VerificationState = "verified_at_recorded_time"
+					if verification.VerifiedAt.After(app.VerifiedAt) {
+						app.VerifiedAt = verification.VerifiedAt
+					}
+					app.State = "published; source verified"
+				} else if !verification.VerifiedAt.IsZero() {
+					app.VerificationState = "stale"
+				}
 				if at.After(app.LastPublishedAt) {
 					app.LastPublishedAt = at
 				}
 			}
+		}
+		app.ReadBackVerified = app.PublishedSessions > 0 && app.VerifiedSessions == app.PublishedSessions
+		if app.Published && !app.ReadBackVerified {
+			app.State = "published; read-back pending"
+			app.VerificationState = "incomplete"
 		}
 		view.Apps = append(view.Apps, app)
 	}
@@ -222,6 +291,7 @@ func statusCode(label string) string {
 		"Not installed": "not_installed", "Setup needs recovery": "recovery_required",
 		"waiting for first session":          "awaiting_session",
 		"hook observed; waiting for capture": "hook_observed",
+		"published; read-back pending":       "published",
 		"captured locally":                   "captured_local", "published; source verified": "published_source_verified",
 	}
 	if code, ok := codes[label]; ok {
