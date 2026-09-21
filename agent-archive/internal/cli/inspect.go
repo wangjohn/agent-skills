@@ -79,6 +79,10 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintln(stderr, "agent-archive: list: --skill-sha256 must be exactly 64 lowercase hexadecimal characters")
 		return 2
 	}
+	if *skillUsage != string(reader.SkillUsageUsed) && *skill == "" && *skillSHA256 == "" {
+		fmt.Fprintln(stderr, "agent-archive: list: --skill-usage requires --skill or --skill-sha256")
+		return 2
+	}
 	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, SkillSHA256: *skillSHA256, RequireCompleteCoverage: *complete}
 	switch usage := reader.SkillUsage(*skillUsage); usage {
 	case reader.SkillUsageUsed, reader.SkillUsageAvailable, reader.SkillUsageEligibleNoUse:

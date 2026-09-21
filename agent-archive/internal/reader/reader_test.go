@@ -85,7 +85,7 @@ func TestRefreshRequiredForDeletedSource(t *testing.T) {
 
 func TestEligibleNoUseRequiresObservedEligibility(t *testing.T) {
 	f := Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}
-	m := archive.Metadata{SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageInstalledOnly}}}
+	m := archive.Metadata{Parser: archive.ParserInfo{Version: archive.DefaultParserVersion}, SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageInstalledOnly}}}
 	if matches(m, f) {
 		t.Fatal("installed_only treated as eligible")
 	}
@@ -148,5 +148,14 @@ func TestReadMetadataAndFindMetadataKeys(t *testing.T) {
 	}
 	if _, err = ReadMetadata(ctx, store, "sessions/codex/broken/metadata.json"); err == nil {
 		t.Fatal("sidecar without a source reference accepted")
+	}
+}
+
+func TestLegacyObservedNoneDoesNotProveUnusedSkill(t *testing.T) {
+	for _, version := range []string{"", "0.1.0", "0.2.0", "0.3.0"} {
+		m := archive.Metadata{Parser: archive.ParserInfo{Version: version}, SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageEligible}}}
+		if matches(m, Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}) {
+			t.Fatalf("trusted legacy inference from %q", version)
+		}
 	}
 }

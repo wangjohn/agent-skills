@@ -300,3 +300,8 @@ After changing buckets or storage folders, do not downgrade to a version that
 does not support `DestinationSince`. Older versions ignore this saved boundary
 and may upload earlier sessions to the new destination. Keep the current version
 until a supported downgrade procedure is available.
+
+Skill comparison metadata uses parser version `0.4.0`. Older `observed_none`
+sidecars remain readable, but are excluded from `eligible_no_use`: earlier parsers
+could infer non-use from availability alone. Normal collection regenerates metadata after a parser upgrade when retained source is available; missing historical observation
+coverage remains unknown. Multiple used hashes of the same skill are retained.

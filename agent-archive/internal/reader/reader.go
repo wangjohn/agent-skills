@@ -164,7 +164,10 @@ func matches(m archive.Metadata, f Filter) bool {
 				}
 			}
 		}
-		eligibleNoUse := available && !used && m.SkillDetection == archive.SkillDetectionObservedNone
+		// Older parsers inferred non-use from availability alone. Those
+		// sidecars remain readable, but cannot support a no-use comparison.
+		legacyDetection := m.Parser.Version == "" || m.Parser.Version == "0.1.0" || m.Parser.Version == "0.2.0" || m.Parser.Version == "0.3.0"
+		eligibleNoUse := available && !used && !legacyDetection && m.SkillDetection == archive.SkillDetectionObservedNone
 		switch f.SkillUsage {
 		case SkillUsageAvailable:
 			if !available {
