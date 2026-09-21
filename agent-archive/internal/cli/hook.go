@@ -291,6 +291,16 @@ func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, ev
 		// track): nothing to request.
 		return nil
 	}
+	registration, registered, err := store.LoadRegistration(archiveID)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		return nil
+	}
+	if canonicalHarness(registration.Harness.Name) != canonicalHarness(harness) {
+		return fmt.Errorf("session event does not match the accepted harness")
+	}
 	reason := strings.ToLower(eventName)
 	var evidence []archive.SupplementalEvidence
 	filtered, err := filteredHookEvidence(archive.EvidenceKindFinalResponse, harness, eventName, payload, true, now)

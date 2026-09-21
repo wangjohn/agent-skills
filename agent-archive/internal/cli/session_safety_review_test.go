@@ -39,6 +39,9 @@ func TestResumeCannotReplaceIdentityOrEraseTranscript(t *testing.T) {
 	if err := handleHookEvent(home, "codex", payload, at.Add(time.Minute)); err == nil {
 		t.Fatal("cross-harness identity accepted")
 	}
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "Stop", "session_id": "s"}, at.Add(time.Minute)); err == nil {
+		t.Fatal("cross-harness stop accepted")
+	}
 	store, _ := collector.NewLocalStore(home)
 	regs, _ := store.LoadRegistrations()
 	if len(regs) != 1 || regs[0].TranscriptPath != "/synthetic/transcript.jsonl" || !regs[0].SessionStartedAt.Equal(at) {
