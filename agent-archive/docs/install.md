@@ -176,6 +176,19 @@ agent-archive list --complete   # complete parser coverage, no capture gaps
 agent-archive show <archive-session-id>
 ```
 
+Metadata model keys `gen_ai.provider.name`, `gen_ai.request.model`, and
+`gen_ai.response.model` follow OpenTelemetry GenAI semantic conventions
+v1.37.0 at commit `aec6e9d3e86754683dab7c707655d69d953b2768`.
+`agent_archive.request.model_label`, `agent_archive.request.reasoning_level`,
+and `agent_archive.request.setting.*` are archive-local extensions. Metadata
+records this revision so a later parser can reproduce the mapping; the archive
+is not an OTLP export.
+Metadata derived by parser 0.2.x may still contain the former local
+`gen_ai.request.reasoning.level`, `gen_ai.request.model.label`, and
+`gen_ai.request.setting.*` keys. Regenerating metadata with parser 0.3.x moves
+those local values to `agent_archive.*` without changing the retained source
+bundle or its hash.
+
 `show` prints conversation content only when asked: `--normalized`
 downloads the session's source bundle, verifies its checksum and identity
 against the metadata, and prints the normalized view (turns, tool calls,

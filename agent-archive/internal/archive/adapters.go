@@ -34,7 +34,7 @@ const adapterVersion = "0.1.0"
 // DefaultParserVersion is the source parser version reported by this bounded
 // foundation. The parser is intentionally partial until fixture coverage proves
 // a given native format more completely.
-const DefaultParserVersion = "0.2.0"
+const DefaultParserVersion = "0.3.0"
 
 // NewAdapter returns a privacy-first adapter by canonical harness name.
 func NewAdapter(name string) (Adapter, error) {
@@ -159,7 +159,7 @@ var allowedKeys = map[string]bool{
 	"tool_name": true, "tool_input": true, "tool_output": true, "tool_use": true,
 	"tool_result": true, "call_id": true, "input": true, "output": true, "result": true, "arguments": true,
 	"command": true, "path": true, "query": true, "url": true, "description": true,
-	"status": true, "turn_id": true, "reasoning_effort": true, "name": true, "items": true, "data": true,
+	"status": true, "event_name": true, "turn_id": true, "reasoning_effort": true, "name": true, "items": true, "data": true,
 	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
 	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,

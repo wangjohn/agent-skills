@@ -19,6 +19,8 @@
     "parser": {"type": "object", "additionalProperties": false, "required": ["name", "version", "status"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "status": {"enum": ["partial", "failed", "complete"]}}},
     "filter_version": {"type": "string"},
     "state": {"enum": ["active", "idle", "closed", "unknown"]},
+    "turn_outcome": {"enum": ["completed", "interrupted", "error", "unknown"]},
+    "semantic_conventions": {"type": "object", "additionalProperties": false, "required": ["name", "revision"], "properties": {"name": {"type": "string"}, "revision": {"type": "string"}}},
     "models": {"type": "array", "items": {"type": "object"}},
     "skills_available": {"type": "array", "items": {"$ref": "#/$defs/skill"}},
     "skills_used": {"type": "array", "items": {"type": "object"}},

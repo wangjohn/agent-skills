@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 )
@@ -32,10 +33,15 @@ func TestFeedbackFileIsFilteredBeforeRequestPersistence(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	requests, err := store.LoadRequests()
-	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 {
+	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 2 {
 		t.Fatalf("requests=%#v err=%v", requests, err)
 	}
-	evidence := requests[0].HookEvidence[0]
+	var evidence archive.SupplementalEvidence
+	for _, item := range requests[0].HookEvidence {
+		if item.Kind == archive.EvidenceKindExplicitFeedback {
+			evidence = item
+		}
+	}
 	text, _ := evidence.Payload["text"].(string)
 	if evidence.Provenance != "user:agent-archive-feedback-file" || evidence.Payload["redacted"] != true || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("evidence=%#v", evidence)
@@ -98,7 +104,7 @@ func TestFeedbackRejectsSessionExcludedByCurrentSetup(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	requests, err := store.LoadRequests()
-	if err != nil || len(requests) != 0 {
+	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Kind != archive.EvidenceKindLifecycleHook {
 		t.Fatalf("requests=%#v err=%v", requests, err)
 	}
 }

@@ -50,6 +50,7 @@ type hookEventKind int
 const (
 	hookEventIgnored hookEventKind = iota
 	hookEventStart
+	hookEventTurnStart
 	hookEventStop
 	hookEventSubagentStop
 	hookEventResponse
@@ -66,6 +67,8 @@ func classifyHookEvent(harness, eventName string) hookEventKind {
 		switch eventName {
 		case "SessionStart":
 			return hookEventStart
+		case "UserPromptSubmit":
+			return hookEventTurnStart
 		case "Stop", "Interrupt", "SessionEnd":
 			return hookEventStop
 		case "SubagentStop":
@@ -75,6 +78,8 @@ func classifyHookEvent(harness, eventName string) hookEventKind {
 		switch eventName {
 		case "SessionStart":
 			return hookEventStart
+		case "UserPromptSubmit":
+			return hookEventTurnStart
 		case "Stop", "StopFailure", "SessionEnd":
 			return hookEventStop
 		case "SubagentStop":
@@ -84,6 +89,8 @@ func classifyHookEvent(harness, eventName string) hookEventKind {
 		switch eventName {
 		case "sessionStart":
 			return hookEventStart
+		case "beforeSubmitPrompt":
+			return hookEventTurnStart
 		case "afterAgentResponse":
 			return hookEventResponse
 		case "stop", "sessionEnd":
@@ -135,10 +142,30 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 	switch kind {
 	case hookEventStart:
 		return handleSessionStart(home, store, cfg, harness, nativeSessionID, payload, now)
+	case hookEventTurnStart:
+		return handleSessionActivity(store, harness, nativeSessionID, eventName, payload, now)
 	case hookEventStop, hookEventSubagentStop, hookEventResponse:
 		return handleSessionStop(store, harness, nativeSessionID, eventName, payload, now)
 	}
 	return nil
+}
+
+func handleSessionActivity(store *collector.LocalStore, harness, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {
+	archiveID, found, err := store.ArchiveSessionID(nativeSessionID)
+	if err != nil {
+		return fmt.Errorf("look up archive session ID: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	reg, found, err := store.LoadRegistration(archiveID)
+	if err != nil {
+		return err
+	}
+	if !found || !strings.EqualFold(reg.Harness.Name, harness) {
+		return nil
+	}
+	return saveLifecycleEvidence(store, archiveID, harness, strings.ToLower(eventName), payload, now)
 }
 
 func handleSessionStart(home string, store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
@@ -303,6 +330,15 @@ func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, ev
 	}
 	reason := strings.ToLower(eventName)
 	var evidence []archive.SupplementalEvidence
+	if isSessionLifecycleEvent(eventName) {
+		lifecycle, err := filteredHookEvidence(archive.EvidenceKindLifecycleHook, harness, eventName, payload, false, now)
+		if err != nil {
+			return err
+		}
+		if lifecycle != nil {
+			evidence = append(evidence, *lifecycle)
+		}
+	}
 	filtered, err := filteredHookEvidence(archive.EvidenceKindFinalResponse, harness, eventName, payload, true, now)
 	if err != nil {
 		return err
@@ -313,11 +349,23 @@ func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, ev
 	return store.SaveRequest(archiveID, reason, now, evidence...)
 }
 
+func isSessionLifecycleEvent(eventName string) bool {
+	switch eventName {
+	case "Stop", "Interrupt", "SessionEnd", "StopFailure", "stop", "sessionEnd":
+		return true
+	default:
+		return false
+	}
+}
+
 // extractHookEvidencePayload passes through only documented or stable identity
 // fields. Cursor's generation_id is normalized to turn_id for reconciliation;
 // every other value remains exactly as observed.
 func extractHookEvidencePayload(payload map[string]any, includeFinalText bool) map[string]any {
 	out := map[string]any{}
+	if eventName := firstNonEmptyString(payload, "hook_event_name"); eventName != "" {
+		out["event_name"] = eventName
+	}
 	for _, key := range []string{"message_id", "turn_id", "agent_id", "model", "model_id"} {
 		if value, ok := payload[key].(string); ok && value != "" {
 			out[key] = value
@@ -354,6 +402,11 @@ func extractHookEvidencePayload(payload map[string]any, includeFinalText bool) m
 
 func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event string, payload map[string]any, includeFinalText bool, now time.Time) (*archive.SupplementalEvidence, error) {
 	hookPayload := extractHookEvidencePayload(payload, includeFinalText)
+	if kind == archive.EvidenceKindLifecycleHook {
+		if status := documentedLifecycleStatus(harness, event, payload); status != "" {
+			hookPayload["status"] = status
+		}
+	}
 	if len(hookPayload) == 0 {
 		return nil, nil
 	}
@@ -371,6 +424,32 @@ func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event 
 		filtered[0].Payload["redacted"] = true
 	}
 	return &filtered[0], nil
+}
+
+// documentedLifecycleStatus retains only closed native enums. Free-form
+// reason/status text is never archived as lifecycle metadata.
+func documentedLifecycleStatus(harness, event string, payload map[string]any) string {
+	if !strings.EqualFold(strings.TrimSpace(harness), "cursor") {
+		return ""
+	}
+	field := ""
+	switch event {
+	case "stop":
+		field = firstNonEmptyString(payload, "status")
+	case "sessionEnd":
+		field = firstNonEmptyString(payload, "reason")
+	default:
+		return ""
+	}
+	switch field {
+	case "completed", "aborted", "error":
+		return field
+	case "window_close", "user_close":
+		if event == "sessionEnd" {
+			return field
+		}
+	}
+	return ""
 }
 
 func firstNonEmptyString(payload map[string]any, keys ...string) string {

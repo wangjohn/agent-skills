@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -69,10 +70,11 @@ func TestClassifyHookEvent(t *testing.T) {
 		{"codex", "SessionStart", hookEventStart},
 		{"codex", "Interrupt", hookEventStop},
 		{"codex", "SubagentStop", hookEventSubagentStop},
-		{"codex", "UserPromptSubmit", hookEventIgnored},
+		{"codex", "UserPromptSubmit", hookEventTurnStart},
 		{"claude", "StopFailure", hookEventStop},
 		{"claude", "PreToolUse", hookEventIgnored},
 		{"cursor", "sessionStart", hookEventStart},
+		{"cursor", "beforeSubmitPrompt", hookEventTurnStart},
 		{"cursor", "afterAgentResponse", hookEventResponse},
 		{"cursor", "stop", hookEventStop},
 		{"cursor", "SessionStart", hookEventIgnored}, // wrong case for this harness
@@ -265,17 +267,35 @@ func TestHandleHookEventStopWritesRequestWithEvidence(t *testing.T) {
 	if err := handleHookEvent(home, "claude", stopPayload, stopAt); err != nil {
 		t.Fatal(err)
 	}
+	if err := handleHookEvent(home, "claude", map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "native-1"}, stopAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 
 	store, _ := collector.NewLocalStore(home)
 	requests, err := store.LoadRequests()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 1 || requests[0].Reasons[0] != "stop" {
+	if len(requests) != 1 || !slices.Contains(requests[0].Reasons, "stop") || !slices.Contains(requests[0].Reasons, "userpromptsubmit") {
 		t.Fatalf("requests=%#v", requests)
 	}
-	if len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Payload["turn_id"] != "t1" {
+	if len(requests[0].HookEvidence) != 4 {
 		t.Fatalf("evidence=%#v", requests[0].HookEvidence)
+	}
+	var lifecycle, resumed, final archive.SupplementalEvidence
+	for _, item := range requests[0].HookEvidence {
+		if item.Kind == archive.EvidenceKindLifecycleHook && item.Payload["event_name"] == "Stop" {
+			lifecycle = item
+		}
+		if item.Kind == archive.EvidenceKindLifecycleHook && item.Payload["event_name"] == "UserPromptSubmit" {
+			resumed = item
+		}
+		if item.Kind == archive.EvidenceKindFinalResponse {
+			final = item
+		}
+	}
+	if lifecycle.Payload["event_name"] != "Stop" || resumed.Payload["event_name"] != "UserPromptSubmit" || final.Payload["turn_id"] != "t1" {
+		t.Fatalf("lifecycle=%#v resumed=%#v final=%#v", lifecycle, resumed, final)
 	}
 }
 
@@ -352,6 +372,26 @@ func TestHandleHookEventStopForUnregisteredSessionIsNoop(t *testing.T) {
 	requests, _ := store.LoadRequests()
 	if len(requests) != 0 {
 		t.Fatalf("requests=%#v", requests)
+	}
+}
+
+func TestCursorLifecycleStatusRetainsOnlyDocumentedEnums(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		event, field, value, want string
+	}{
+		{"stop", "status", "completed", "completed"},
+		{"stop", "status", "incomplete", ""},
+		{"sessionEnd", "reason", "aborted", "aborted"},
+		{"sessionEnd", "reason", "user supplied arbitrary text", ""},
+	} {
+		evidence, err := filteredHookEvidence(archive.EvidenceKindLifecycleHook, "cursor", tc.event, map[string]any{"hook_event_name": tc.event, tc.field: tc.value}, false, now)
+		if err != nil || evidence == nil {
+			t.Fatalf("%s: evidence=%#v err=%v", tc.value, evidence, err)
+		}
+		if got, _ := evidence.Payload["status"].(string); got != tc.want {
+			t.Fatalf("%s retained status %q, want %q: %#v", tc.value, got, tc.want, evidence)
+		}
 	}
 }
 
