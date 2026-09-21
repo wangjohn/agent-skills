@@ -8,8 +8,8 @@ package retention
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
@@ -78,7 +78,7 @@ func Sweep(ctx context.Context, local *collector.LocalStore, store storage.Objec
 }
 
 func sweepSession(ctx context.Context, local *collector.LocalStore, store storage.ObjectStore, reg archive.SessionRegistration, opts Options, now time.Time, result *Result) error {
-	bundle, _, status, found, err := local.LoadPublished(reg.ArchiveSessionID)
+	bundle, _, _, found, err := local.LoadPublished(reg.ArchiveSessionID)
 	if err != nil {
 		return fmt.Errorf("load published cache: %w", err)
 	}
@@ -102,24 +102,30 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 		return nil
 	}
 
-	var currentKey string
-	if found && status == collector.CacheStatusPublished {
-		// If either of these fails, currentKey must not silently stay "":
-		// the loop below treats a non-matching currentKey as "not the
-		// current source," so an empty one would defeat the "never delete
-		// the currently referenced object" guard below instead of just
-		// skipping the delete. Both calls are deterministic recomputations
-		// of a bundle that was already successfully published, so a
-		// failure here means something is genuinely wrong; abort this
-		// session's sweep (isolated by the caller, retried next pass)
-		// rather than risk deleting a live source.
-		compressed, err := archive.BuildCompressedSource(bundle)
-		if err != nil {
-			return fmt.Errorf("recompute current source key: %w", err)
-		}
-		currentKey, err = archive.SourceObjectKey(bundle, compressed.SHA256)
-		if err != nil {
-			return fmt.Errorf("recompute current source key: %w", err)
+	// The remote pointer is authoritative, including when the local cache
+	// contains a newer candidate that has not been published yet.
+	metadataKey, err := archive.MetadataObjectKey(reg.Harness.Name, reg.ArchiveSessionID)
+	if err != nil {
+		return err
+	}
+	data, err := store.Get(ctx, metadataKey)
+	if err != nil {
+		return fmt.Errorf("read current metadata before cleanup: %w", err)
+	}
+	var metadata archive.Metadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("decode current metadata: %w", err)
+	}
+	currentKey := metadata.SourceBundle.Key
+	if currentKey == "" {
+		return fmt.Errorf("current metadata has no source reference")
+	}
+	// Keep the most recently superseded source indefinitely as the predecessor.
+	// Equal timestamps are protected together rather than choosing arbitrarily.
+	var predecessorAt time.Time
+	for _, s := range superseded {
+		if s.Key != currentKey && s.SupersededAt.After(predecessorAt) {
+			predecessorAt = s.SupersededAt
 		}
 	}
 	for _, s := range superseded {
@@ -131,7 +137,7 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 			}
 			continue
 		}
-		if now.Sub(s.SupersededAt) < opts.gracePeriod() {
+		if s.SupersededAt.Equal(predecessorAt) || now.Sub(s.SupersededAt) < opts.gracePeriod() {
 			continue
 		}
 		if err := store.Delete(ctx, s.Key); err != nil {
@@ -145,32 +151,24 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 	return nil
 }
 
-// deleteWholeSession deletes every source snapshot before metadata, so an
-// interruption partway leaves at worst a metadata pointer to an
-// already-deleted source — the exact case reader.LoadSource already handles
-// safely via ErrRefreshRequired — never the reverse (a source with no
-// metadata pointing to it is merely unreferenced, not dangling). Not
-// finding every object it expects on a retry is not an error: a prior,
-// interrupted sweep may have already deleted some of them.
+// Remove discovery first. If source deletion is interrupted, unreferenced
+// objects remain for the next sweep, but no live metadata points at missing data.
 func deleteWholeSession(ctx context.Context, store storage.ObjectStore, harness, archiveSessionID string) error {
+	metadataKey, err := archive.MetadataObjectKey(harness, archiveSessionID)
+	if err != nil {
+		return err
+	}
+	if err := store.Delete(ctx, metadataKey); err != nil {
+		return fmt.Errorf("delete metadata: %w", err)
+	}
 	prefix := fmt.Sprintf("sessions/%s/%s/", harness, archiveSessionID)
 	objects, err := store.List(ctx, prefix)
 	if err != nil {
 		return fmt.Errorf("list %q: %w", prefix, err)
 	}
-	var metadataKey string
 	for _, obj := range objects {
-		if strings.HasSuffix(obj.Key, "/metadata.json") {
-			metadataKey = obj.Key
-			continue
-		}
 		if err := store.Delete(ctx, obj.Key); err != nil {
 			return fmt.Errorf("delete %q: %w", obj.Key, err)
-		}
-	}
-	if metadataKey != "" {
-		if err := store.Delete(ctx, metadataKey); err != nil {
-			return fmt.Errorf("delete %q: %w", metadataKey, err)
 		}
 	}
 	return nil
