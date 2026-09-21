@@ -53,6 +53,9 @@ type Env struct {
 	// application prompts; the user can still include or exclude any of
 	// them regardless of what this reports. Defaults to detectHarnesses.
 	DetectHarnesses func(userHome string) []string
+	// DiscoverApplications performs bounded, read-only installed-version
+	// discovery. It must not inspect transcripts, install hooks, or use the network.
+	DiscoverApplications func(userHome string) map[string]applicationDiscovery
 	// LoadLaunchAgent loads the just-written LaunchAgent plist so scheduled
 	// collection starts without a login/logout cycle. Defaults to shelling
 	// out to launchctl; unverified against a real launchd (see the
@@ -118,6 +121,13 @@ func (e Env) detectHarnesses(userHome string) []string {
 		return e.DetectHarnesses(userHome)
 	}
 	return detectHarnesses(userHome)
+}
+
+func (e Env) discoverApplications(userHome string) map[string]applicationDiscovery {
+	if e.DiscoverApplications != nil {
+		return e.DiscoverApplications(userHome)
+	}
+	return discoverApplications(userHome)
 }
 
 func (e Env) loadLaunchAgent(plistPath string) error {

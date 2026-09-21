@@ -17,6 +17,10 @@ func showSetupReview(p *prompter, cfg config.Config, reconfiguring bool) {
 	}
 	fmt.Fprintln(p.out, "\n3 of 3 — "+title+"\n")
 	fmt.Fprintf(p.out, "Apps       %s\n", friendlyApps(cfg.Harnesses))
+	for _, app := range cfg.Harnesses {
+		profile := captureCapabilityProfile(app)
+		fmt.Fprintf(p.out, "  %s: installed version unverified; fresh-start evidence %s; transcript %s\n", appName(app), profile.FreshStart.State, profile.Transcript.State)
+	}
 	for _, project := range cfg.Archive.Projects {
 		if project.Included {
 			fmt.Fprintf(p.out, "Project    %s\n", project.Root)

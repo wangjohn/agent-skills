@@ -61,6 +61,7 @@ func setupTestEnv(t *testing.T, home, userHome string, keychain *fakeKeychain, n
 	env.UserHomeDir = func() (string, error) { return userHome, nil }
 	env.Executable = func() (string, error) { return "/opt/agent-archive/bin/agent-archive", nil }
 	env.DetectHarnesses = func(string) []string { return nil }
+	env.DiscoverApplications = func(string) map[string]applicationDiscovery { return map[string]applicationDiscovery{} }
 	state := "missing"
 	env.JobState = func(string) string { return state }
 	env.LoadLaunchAgent = func(string) error { state = "loaded"; return nil }

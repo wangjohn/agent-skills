@@ -16,19 +16,27 @@ import (
 )
 
 type appStatus struct {
-	PublishedSessions int                  `json:"published_sessions"`
-	VerifiedSessions  int                  `json:"verified_sessions"`
-	Configured        bool                 `json:"configured"`
-	HookObserved      bool                 `json:"hook_observed"`
-	CapturedLocally   bool                 `json:"captured_locally"`
-	Published         bool                 `json:"published"`
-	ReadBackVerified  bool                 `json:"read_back_verified"`
-	VerifiedAt        time.Time            `json:"verified_at,omitempty"`
-	VerificationState string               `json:"verification_state"`
-	Trust             string               `json:"trust"`
-	HarnessVersions   []string             `json:"observed_harness_versions,omitempty"`
-	AdapterVersions   []string             `json:"observed_adapter_versions,omitempty"`
-	CaptureGaps       []archive.CaptureGap `json:"capture_gaps,omitempty"`
+	PublishedSessions       int                  `json:"published_sessions"`
+	VerifiedSessions        int                  `json:"verified_sessions"`
+	Configured              bool                 `json:"configured"`
+	HookObserved            bool                 `json:"hook_observed"`
+	CapturedLocally         bool                 `json:"captured_locally"`
+	Published               bool                 `json:"published"`
+	ReadBackVerified        bool                 `json:"read_back_verified"`
+	VerifiedAt              time.Time            `json:"verified_at,omitempty"`
+	VerificationState       string               `json:"verification_state"`
+	Trust                   string               `json:"trust"`
+	HarnessVersions         []string             `json:"observed_harness_versions,omitempty"`
+	AdapterVersions         []string             `json:"observed_adapter_versions,omitempty"`
+	CaptureGaps             []archive.CaptureGap `json:"capture_gaps,omitempty"`
+	Installed               bool                 `json:"installed"`
+	InstalledVersion        string               `json:"installed_version,omitempty"`
+	VersionSource           string               `json:"installed_version_source,omitempty"`
+	VersionObservedAt       time.Time            `json:"installed_version_observed_at,omitempty"`
+	VersionState            string               `json:"installed_version_state"`
+	VersionSupport          string               `json:"installed_version_support"`
+	Capabilities            captureCapabilities  `json:"capabilities"`
+	verifiedHarnessVersions []string
 
 	Code            string    `json:"code"`
 	Hooks           string    `json:"hooks"`
@@ -83,6 +91,10 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	fmt.Fprintf(stdout, "Projects:      %d included\nPending:       %d session(s)\nLast scan:     %s\nLast publish:  %s\n", len(view.Projects), view.Collector.PendingCount, formatTimeOrNever(view.Collector.LastScanAt), formatTimeOrNever(view.Collector.LastPublishedAt))
 	for _, app := range view.Apps {
 		fmt.Fprintf(stdout, "%s: %s (%d session(s)); hooks %s\n", appName(app.Name), app.State, app.Sessions, app.Hooks)
+		fmt.Fprintf(stdout, "  Installed version: %s; support %s.\n", installedVersionLabel(app), app.VersionSupport)
+		if app.Capabilities.FreshStart.State == "unavailable" {
+			fmt.Fprintf(stdout, "  Fresh-start capture: unavailable. %s\n", app.Capabilities.FreshStart.NextAction)
+		}
 		if !app.VerifiedAt.IsZero() {
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
 		}
@@ -99,6 +111,16 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	fmt.Fprintf(stdout, "\nNext: %s\n", view.Next)
 	return 0
 }
+
+func installedVersionLabel(app appStatus) string {
+	if app.InstalledVersion != "" {
+		return app.InstalledVersion
+	}
+	if app.VersionState != "" {
+		return app.VersionState
+	}
+	return "unknown"
+}
 func readStatus(env Env) (view statusView, err error) {
 	defer func() {
 		view.Code = statusCode(view.State)
@@ -106,7 +128,7 @@ func readStatus(env Env) (view statusView, err error) {
 			view.Apps[i].Code = statusCode(view.Apps[i].State)
 		}
 	}()
-	view = statusView{Version: 1, State: "Not set up", Privacy: "not_verified", Background: "unknown", Projects: []string{}, Apps: []appStatus{}, Next: "Run agent-archive setup to get started."}
+	view = statusView{Version: 2, State: "Not set up", Privacy: "not_verified", Background: "unknown", Projects: []string{}, Apps: []appStatus{}, Next: "Run agent-archive setup to get started."}
 	home, err := env.readHome()
 	if err != nil {
 		return view, err
@@ -217,6 +239,9 @@ func readStatus(env Env) (view statusView, err error) {
 						app.VerifiedAt = verification.VerifiedAt
 					}
 					app.State = "published; source verified"
+					if reg.Harness.Version != "" && !containsString(app.verifiedHarnessVersions, reg.Harness.Version) {
+						app.verifiedHarnessVersions = append(app.verifiedHarnessVersions, reg.Harness.Version)
+					}
 				} else if !verification.VerifiedAt.IsZero() {
 					app.VerificationState = "stale"
 				}
@@ -237,7 +262,25 @@ func readStatus(env Env) (view statusView, err error) {
 		return view, err
 	}
 	executable, executableErr := env.executable()
+	discovered, err := readApplicationDiscoveries(home)
+	if err != nil {
+		return view, err
+	}
 	for i := range view.Apps {
+		appDiscovery := discovered[view.Apps[i].Name]
+		if appDiscovery.VersionState == "" {
+			appDiscovery.VersionState = "unknown"
+		}
+		if !appDiscovery.ObservedAt.IsZero() && env.now().Sub(appDiscovery.ObservedAt) > 24*time.Hour {
+			appDiscovery.VersionState = "stale"
+		}
+		view.Apps[i].Installed = appDiscovery.Installed
+		view.Apps[i].InstalledVersion = appDiscovery.Version
+		view.Apps[i].VersionSource = appDiscovery.VersionSource
+		view.Apps[i].VersionObservedAt = appDiscovery.ObservedAt
+		view.Apps[i].VersionState = appDiscovery.VersionState
+		view.Apps[i].Capabilities = captureCapabilityProfile(view.Apps[i].Name)
+		view.Apps[i].VersionSupport = installedVersionSupport(appDiscovery, view.Apps[i].verifiedHarnessVersions)
 		installed, e := hooks.Installed(userHome, executable, view.Apps[i].Name)
 		switch {
 		case e != nil || executableErr != nil:

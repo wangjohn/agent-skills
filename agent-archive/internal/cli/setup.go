@@ -272,6 +272,9 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 		if err = applySetup(home, userHome, exe, existing, &draft.Config, env); err != nil {
 			return err
 		}
+		if err = recordApplicationDiscoveries(home, env.discoverApplications(userHome), env.now()); err != nil {
+			fmt.Fprintf(out, "Warning: installed application versions could not be recorded: %v\n", err)
+		}
 		if err = os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
