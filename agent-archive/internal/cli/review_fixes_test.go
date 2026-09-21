@@ -52,7 +52,8 @@ func TestFailedScheduledUpdateBlocksDestinationSwitchUntilRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(bytes), "visible", "updated")), 0600); err != nil {
+	update := `{"type":"response_item","id":"update","payload":{"type":"message","role":"user","content":"updated"}}`
+	if err := os.WriteFile(path, append(append(bytes, '\n'), update...), 0600); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
