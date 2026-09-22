@@ -610,3 +610,27 @@ func TestAllHiddenContentArrayOmitsFieldInsteadOfEmptyPlaceholder(t *testing.T) 
 		t.Fatalf("empty content placeholder still present: %s", f.Records[0])
 	}
 }
+
+func TestClaudeBundleAttributesRecordVersionToHarness(t *testing.T) {
+	filtered, err := (ClaudeAdapter{}).FilterJSONL(bytes.NewReader(fixture(t, "claude-tool-use.jsonl")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasGap(filtered.Gaps, "unknown_field_omitted") {
+		t.Fatalf("version field was dropped: %#v", filtered.Gaps)
+	}
+	reg := registration()
+	reg.Harness = Harness{Name: "claude"}
+	bundle, err := NewSourceBundle(reg, ClaudeAdapter{}, filtered, time.Date(2026, 9, 17, 18, 25, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Capture.Harness.Version != "1.0.83" {
+		t.Fatalf("claude harness version = %q, want 1.0.83", bundle.Capture.Harness.Version)
+	}
+	// A Codex transcript must not pick up a stray version key the same way.
+	codex := observedHarness(Harness{Name: "codex", Version: "keep"}, "codex-jsonl", []map[string]any{{"type": "message", "version": "9.9.9"}})
+	if codex.Version != "keep" {
+		t.Fatalf("codex harness version = %q", codex.Version)
+	}
+}

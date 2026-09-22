@@ -1,6 +1,8 @@
 package evidence
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +40,100 @@ func TestObserveSkillsHashesOriginalAndFiltersSnapshot(t *testing.T) {
 	}
 	if text := snapshot["snapshot"].(string); strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("snapshot text=%q", text)
+	}
+	if _, truncated := snapshot["truncated"]; truncated || fmt.Sprint(snapshot["gaps"]) != "[sensitive_content_redacted]" {
+		t.Fatalf("gap labels=%#v", snapshot)
+	}
+}
+
+func TestObserveSkillsLabelsTruncatedSnapshotWithoutClaimingRedaction(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".agents", "skills", "long")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("---\nname: long\n---\n" + strings.Repeat("plain instruction text\n", 4096)) // ~96 KiB, over the 64 KiB text cap
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	for _, item := range got {
+		if item.Kind == archive.EvidenceKindSkillSnapshot {
+			snapshot = item.Payload
+		}
+	}
+	digest := sha256.Sum256(original)
+	if snapshot == nil || snapshot["sha256"] != hex.EncodeToString(digest[:]) || len(snapshot["snapshot"].(string)) >= len(original) {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+	if snapshot["truncated"] != true || snapshot["redacted"] != false || fmt.Sprint(snapshot["gaps"]) != "[content_truncated]" {
+		t.Fatalf("truncation mislabeled: %#v", snapshot)
+	}
+}
+
+func TestObserveSkillsUnreadableRootIsCoverageGapNotFailure(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file where the skills directory is expected: ENOTDIR, not ENOENT.
+	if err := os.WriteFile(filepath.Join(home, ".agents", "skills"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("unreadable root failed observation: %v", err)
+	}
+	if len(got) != 2 || got[0].Kind != archive.EvidenceKindSkillInventory || got[0].Payload["scope"] != "user_agents" {
+		t.Fatalf("evidence=%#v", got)
+	}
+	if got[0].Payload["root_status"] != "unreadable" || got[0].Payload["inventory_complete"] != false || len(got[0].Payload["skills"].([]any)) != 0 {
+		t.Fatalf("unreadable root=%#v", got[0])
+	}
+	if got[1].Payload["root_status"] != "absent" {
+		t.Fatalf("other roots were affected: %#v", got[1])
+	}
+}
+
+func TestObserveSkillsUnreadableSkillFileIsUninspected(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions are not enforced for root")
+	}
+	home := t.TempDir()
+	root := filepath.Join(home, ".agents", "skills")
+	for _, name := range []string{"locked", "readable"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	locked := filepath.Join(root, "locked", "SKILL.md")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+	got, err := ObserveSkills(SkillOptions{Harness: "codex", UserHome: home, ObservedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("unreadable SKILL.md failed observation: %v", err)
+	}
+	inventory := got[0].Payload
+	if inventory["root_status"] != "present" || inventory["inventory_complete"] != false || inventory["omitted_count"] != float64(1) {
+		t.Fatalf("inventory=%#v", inventory)
+	}
+	names := []string{}
+	for _, item := range got {
+		if item.Kind == archive.EvidenceKindSkillSnapshot {
+			names = append(names, item.Payload["name"].(string))
+		}
+	}
+	if len(names) != 1 || names[0] != "readable" {
+		t.Fatalf("snapshots=%v", names)
 	}
 }
 
