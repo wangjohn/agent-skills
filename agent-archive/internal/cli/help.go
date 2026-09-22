@@ -68,6 +68,13 @@ Print session metadata as JSON. --normalized explicitly downloads and verifies
 its source bundle and prints conversation content as well.
 Example: agent-archive show SESSION_ID --normalized
 `,
+	"feedback": `Usage: agent-archive feedback ID --file PATH
+
+Attach an explicit user assessment to a locally captured session. The file is
+read locally, privacy-filtered, and queued for the next collection pass. Its
+path is not archived. Collection remains paused until you resume it.
+Example: agent-archive feedback SESSION_ID --file /private/path/feedback.txt
+`,
 }
 
 // Preflight never resolves paths, credentials, or runtime dependencies.
@@ -104,7 +111,7 @@ func commandPreflight(args []string, out, errOut io.Writer) (bool, int) {
 			return true, 0
 		}
 	}
-	if cmd == "list" || cmd == "show" {
+	if cmd == "list" || cmd == "show" || cmd == "feedback" {
 		return false, 0
 	} // Their parsers validate before I/O.
 	allowed := ""

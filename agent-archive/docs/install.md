@@ -167,6 +167,38 @@ ID was somehow published under more than one harness, pass `--harness` to
 pick one. Both commands print `Not set up.` and exit 0 before setup has run,
 the same as `status`.
 
+### Add explicit feedback
+
+Write your assessment to a private UTF-8 text file, then attach it to a session
+owned by this Mac:
+
+```sh
+agent-archive feedback <archive-session-id> --file /private/path/feedback.txt
+agent-archive sync
+```
+
+Feedback is filtered before it enters the local upload queue. It records user
+provenance and observation time; finishing a turn is never treated as success.
+The command rejects excluded sessions and sessions retired by a destination
+change. Feedback for a paused, still-included session waits for resume.
+
+### Skill evidence and coverage
+
+During initial capture or new session activity, the background collector checks
+known skill directories for the selected app. It records installed skills,
+original instruction hashes, filtered instruction copies, and observation times.
+These filesystem observations do not prove that the app discovered a skill,
+made it eligible, or used that exact version during an earlier turn.
+
+Changed inventories and instruction versions remain in session history. Empty
+and removed directories produce explicit observations. Unchanged observations
+are not appended again. Skill edits alone do not refresh inactive sessions.
+Within one collector pass, user-scope skill directories are read once per app
+and each project's skill directory once, with at most 4 MiB of instruction
+content per such read. Oversized, truncated, nested, unreadable, and
+uninspected plugin content is marked as a coverage gap rather than failing the
+session. Hooks do not perform this filesystem scan.
+
 ## Build from source
 
 Requires Go 1.24+ and, for real macOS Keychain access, Xcode's command

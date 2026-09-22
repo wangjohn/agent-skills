@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -114,6 +115,108 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 		out = append(out, SupplementalEvidence{Kind: evidence.Kind, ObservedAt: evidence.ObservedAt.UTC(), Provenance: evidence.Provenance, Payload: payload})
 	}
 	return out, gaps, nil
+}
+
+// AnnotateSupplementalGaps records what FilterSupplementalEvidence did to a
+// producer's evidence on that evidence itself. Producers filter before
+// persistence, so the later pass in NewSourceBundle sees already-clean input
+// and cannot report these gaps in Capture.Gaps. "redacted" and "truncated"
+// are set only by their own codes; "gaps" lists every distinct code once.
+func AnnotateSupplementalGaps(payload map[string]any, gaps []CaptureGap) {
+	if payload == nil || len(gaps) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	codes := make([]string, 0, len(gaps))
+	for _, gap := range gaps {
+		if gap.Code == "" || seen[gap.Code] {
+			continue
+		}
+		seen[gap.Code] = true
+		codes = append(codes, gap.Code)
+		switch gap.Code {
+		case "sensitive_content_redacted":
+			payload["redacted"] = true
+		case "content_truncated":
+			payload["truncated"] = true
+		}
+	}
+	sort.Strings(codes)
+	list := make([]any, 0, len(codes))
+	for _, code := range codes {
+		list = append(list, code)
+	}
+	payload["gaps"] = list
+}
+
+// MergeSupplementalEvidence combines observations without allowing the time
+// of a repeated background scan to manufacture a new source snapshot.
+// Inventories form a history: a changed inventory is appended with its actual
+// observation time, while an unchanged latest inventory is omitted. Skill
+// snapshots retain every distinct filtered/original-hash version but do not
+// repeat identical bytes. Other evidence is event-shaped and remains
+// append-only, with exact retry duplicates removed.
+func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []SupplementalEvidence {
+	out := append([]SupplementalEvidence(nil), previous...)
+	for _, candidate := range fresh {
+		switch candidate.Kind {
+		case EvidenceKindSkillInventory:
+			identity := supplementalIdentity(candidate)
+			unchanged := false
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Kind == EvidenceKindSkillInventory && supplementalIdentity(out[i]) == identity {
+					unchanged = supplementalPayloadEqual(out[i].Payload, candidate.Payload)
+					break
+				}
+			}
+			if !unchanged {
+				out = append(out, candidate)
+			}
+		case EvidenceKindSkillSnapshot:
+			duplicate := false
+			for _, existing := range out {
+				if existing.Kind == EvidenceKindSkillSnapshot && supplementalIdentity(existing) == supplementalIdentity(candidate) && supplementalPayloadEqual(existing.Payload, candidate.Payload) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+		default:
+			duplicate := false
+			for _, existing := range out {
+				if supplementalEvidenceEqual(existing, candidate) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				out = append(out, candidate)
+			}
+		}
+	}
+	return out
+}
+
+func supplementalEvidenceEqual(a, b SupplementalEvidence) bool {
+	return a.Kind == b.Kind && a.Provenance == b.Provenance && a.ObservedAt.Equal(b.ObservedAt) && supplementalPayloadEqual(a.Payload, b.Payload)
+}
+
+func supplementalIdentity(e SupplementalEvidence) string {
+	identity := string(e.Kind) + "\x00" + e.Provenance
+	if e.Kind == EvidenceKindSkillSnapshot {
+		identity += "\x00" + firstString(e.Payload, "name") + "\x00" + firstString(e.Payload, "scope")
+	} else {
+		identity += "\x00" + firstString(e.Payload, "coverage") + "\x00" + firstString(e.Payload, "scope")
+	}
+	return identity
+}
+
+func supplementalPayloadEqual(a, b map[string]any) bool {
+	aJSON, aErr := json.Marshal(a)
+	bJSON, bErr := json.Marshal(b)
+	return aErr == nil && bErr == nil && bytes.Equal(aJSON, bJSON)
 }
 
 // BuildCompressedSource serializes a bundle canonically and uses gzip headers

@@ -7,9 +7,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/evidence"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/retention"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
@@ -104,10 +106,11 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		return collector.Result{}, storeErr
 	}
 	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
-		MachineID:       cfg.MachineID,
-		AcceptSession:   cfg.AcceptSession,
-		Now:             env.Now,
-		RequireSkillUse: cfg.RequireSkillUse,
+		MachineID:            cfg.MachineID,
+		SupplementalEvidence: skillObserver(env),
+		AcceptSession:        cfg.AcceptSession,
+		Now:                  env.Now,
+		RequireSkillUse:      cfg.RequireSkillUse,
 	})
 	if err != nil {
 		return result, err
@@ -172,4 +175,38 @@ func openConfiguredStore(cfg config.Config) (storage.ObjectStore, error) {
 		return nil, fmt.Errorf("keychain unavailable: %w", keychainErr)
 	}
 	return storage.NewConfiguredStore(context.Background(), cfg.Storage, keychain)
+}
+
+// skillObserver shares bounded observations within a pass: user-scope skill
+// roots are read once per harness, project-scope roots once per
+// harness/project. Each read carries its own instruction-content cap, so a
+// pass reads at most that cap per harness plus that cap per project.
+func skillObserver(env Env) func(archive.SessionRegistration, time.Time) ([]archive.SupplementalEvidence, error) {
+	userCache := map[string][]archive.SupplementalEvidence{}
+	projectCache := map[string][]archive.SupplementalEvidence{}
+	return func(reg archive.SessionRegistration, at time.Time) ([]archive.SupplementalEvidence, error) {
+		userScope, ok := userCache[reg.Harness.Name]
+		if !ok {
+			userHome, err := env.userHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			userScope, err = evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, UserHome: userHome, ObservedAt: at})
+			if err != nil {
+				return nil, err
+			}
+			userCache[reg.Harness.Name] = userScope
+		}
+		projectKey := reg.Harness.Name + "\x00" + reg.ProjectRoot
+		projectScope, ok := projectCache[projectKey]
+		if !ok {
+			var err error
+			projectScope, err = evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, ProjectRoot: reg.ProjectRoot, ObservedAt: at})
+			if err != nil {
+				return nil, err
+			}
+			projectCache[projectKey] = projectScope
+		}
+		return append(append([]archive.SupplementalEvidence(nil), userScope...), projectScope...), nil
+	}
 }
