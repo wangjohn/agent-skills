@@ -239,7 +239,10 @@ func TestStatusPreservesPublicationDuringRateLimitedUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(b), "visible", "updated")), 0600); err != nil {
+	// Append a record: an in-place edit would be a rewrite (a recorded
+	// capture gap), not a rate-limited update.
+	update := `{"type":"response_item","id":"m2","payload":{"type":"message","role":"assistant","content":"updated"}}`
+	if err := os.WriteFile(path, append(append(b, '\n'), update...), 0600); err != nil {
 		t.Fatal(err)
 	}
 	env.Now = func() time.Time { return now.Add(time.Second) }
@@ -249,5 +252,64 @@ func TestStatusPreservesPublicationDuringRateLimitedUpdate(t *testing.T) {
 	after, err := readStatus(env)
 	if err != nil || after.Apps[0].LastPublishedAt.IsZero() || !after.Apps[0].LastPublishedAt.Equal(before.Apps[0].LastPublishedAt) || after.State == "Waiting for capture" || after.Collector.PendingCount != 1 {
 		t.Fatalf("status=%+v err=%v", after, err)
+	}
+}
+
+func TestBlockedCaptureIsNotPendingAndStatusReportsGap(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	now := time.Now().UTC()
+	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), now)
+	setupRun(t, env, s3SetupInput("bucket", "us-east-1", "profile", true, false, false, project), 0)
+	path := writeCodexTranscript(t, project)
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnePass(env, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compaction rewrote the transcript to something that no longer extends
+	// the published snapshot, and a stop hook asked for a flush.
+	if err := os.WriteFile(path, []byte(`{"type":"turn_context","model":"gpt-test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "Stop", "session_id": "native", "cwd": project, "transcript_path": path}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	env.Now = func() time.Time { return now.Add(2 * time.Second) }
+	for pass := 0; pass < 2; pass++ {
+		result, err := runOnePass(env, false)
+		if err != nil || len(result.Errors) != 0 || len(result.Published) != 0 {
+			t.Fatalf("pass %d: result=%+v err=%v", pass, result, err)
+		}
+	}
+	cfg, _, err := config.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := pendingSessions(home, cfg); err != nil || pending != 0 {
+		t.Fatalf("blocked session counted as pending: %d err=%v", pending, err)
+	}
+	next := cfg
+	next.Storage.Bucket = "another-bucket"
+	if err := reviewChanges(home, cfg, next, newPrompter(strings.NewReader(""), os.Stdout), env); err != nil {
+		t.Fatalf("blocked session prevented a destination change: %v", err)
+	}
+	after, err := readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Collector.LastError != "" || after.Collector.PendingCount != 0 || after.Apps[0].CaptureGaps != 1 || !after.Apps[0].LastPublishedAt.Equal(before.Apps[0].LastPublishedAt) || after.Apps[0].State != "published; source verified" {
+		t.Fatalf("status=%+v", after)
+	}
+	var out strings.Builder
+	if code := runStatusCommand(nil, &out, os.Stderr, env); code != 0 {
+		t.Fatalf("status exit=%d output=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "1 with a capture gap") || strings.Contains(out.String(), "Last error") {
+		t.Fatalf("status output=%s", out.String())
 	}
 }
