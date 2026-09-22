@@ -111,7 +111,7 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 	if quietOnBusy {
 		var prior storageHealth
 		healthErr := local.Read(filepath.Join(home, "storage-health.json"), &prior)
-		if healthErr != nil || prior.ConfigurationID != configurationID(cfg) || prior.Context != "background_collector" || prior.State != "verified" || env.now().Sub(prior.CheckedAt) > 5*time.Minute {
+		if healthErr != nil || prior.ConfigurationID != configurationID(cfg) || prior.Context != "background_collector" || prior.State != "verified" || env.now().Sub(prior.CheckedAt) > storageHealthRefreshAfter {
 			probeErr := storage.VerifyAccess(context.Background(), objectStore, "")
 			state := "verified"
 			if probeErr != nil {
@@ -138,21 +138,10 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		return result, err
 	}
 
-	if err := verifyPublications(home, cfg, env, localStore, objectStore, &result); err != nil {
+	if _, err := verifyPublications(home, cfg, env, localStore, objectStore); err != nil {
 		return result, err
 	}
-	health := "not_checked"
-	if len(result.Published) > 0 {
-		health = "verified"
-	}
-	for _, sessionErr := range result.Errors {
-		if state := storageFailureState(sessionErr); state != "storage_unavailable" {
-			health = state
-			break
-		}
-		health = "not_checked"
-	}
-	if health != "not_checked" {
+	if health := passStorageHealth(result); health != "not_checked" {
 		if err := recordStorageHealth(home, cfg, env, quietOnBusy, health); err != nil {
 			return result, err
 		}
@@ -170,15 +159,13 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 				code = "transcript_discontinuity"
 			case strings.Contains(issue.Error(), "collection limit"):
 				code = "transcript_size_limit"
-			case strings.Contains(issue.Error(), "read-back verification"):
-				code = "read_back_failed"
 			}
 			state.SessionIssues[id] = code
 		}
 		if err := localStore.SaveStatus(state); err != nil {
 			return result, err
 		}
-		recordPreflightError(localStore, fmt.Errorf("%d session(s) need capture, publication, or read-back verification", len(result.Errors)))
+		recordPreflightError(localStore, fmt.Errorf("%d session(s) need capture or publication", len(result.Errors)))
 	}
 
 	sweepResult, sweepErr := retention.Sweep(context.Background(), localStore, objectStore, retention.Options{
@@ -193,6 +180,31 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 		recordRetentionErrors(localStore, &result, sweepResult)
 	}
 	return result, nil
+}
+
+// passStorageHealth derives the storage-access evidence one pass produced. A
+// publication is a real round trip, so it stands as "verified" even when
+// other sessions failed for reasons unrelated to storage (a rewritten
+// transcript, a size limit). Only a genuine storage error can downgrade it:
+// an authentication failure always wins, and a plain storage outage leaves
+// the pass unchecked only when nothing was published through it.
+func passStorageHealth(result collector.Result) string {
+	health := "not_checked"
+	if len(result.Published) > 0 {
+		health = "verified"
+	}
+	for _, sessionErr := range result.Errors {
+		if !isStorageError(sessionErr) {
+			continue
+		}
+		if state := storageFailureState(sessionErr); state != "storage_unavailable" {
+			return state
+		}
+		if len(result.Published) == 0 {
+			health = "not_checked"
+		}
+	}
+	return health
 }
 
 // recordRetentionErrors merges retention.Sweep's per-session failures into

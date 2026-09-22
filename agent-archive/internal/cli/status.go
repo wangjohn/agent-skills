@@ -25,9 +25,13 @@ type appStatus struct {
 	ReadBackVerified  bool      `json:"read_back_verified"`
 	VerifiedAt        time.Time `json:"verified_at,omitempty"`
 	VerificationState string    `json:"verification_state"`
-	Trust             string    `json:"trust"`
-	HarnessVersions   []string  `json:"observed_harness_versions,omitempty"`
-	AdapterVersions   []string  `json:"observed_adapter_versions,omitempty"`
+	// VerificationDetail explains a read-back that has not succeeded yet for
+	// the current publication: the last error, attempts so far, and when the
+	// collector will retry. Empty once every publication is verified.
+	VerificationDetail string   `json:"verification_detail,omitempty"`
+	Trust              string   `json:"trust"`
+	HarnessVersions    []string `json:"observed_harness_versions,omitempty"`
+	AdapterVersions    []string `json:"observed_adapter_versions,omitempty"`
 	// CaptureGaps lists recorded gaps: sessions whose current transcript can
 	// no longer be captured (rewritten or over the size limit), per-session
 	// scan issues, and gaps recorded inside captured bundles. A blocked
@@ -79,7 +83,11 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if view.Storage != "" {
 		fmt.Fprintf(stdout, "Storage:       %s\nAccess checked: %s (privacy not verified)\n", view.Storage, formatTimeOrNever(view.StorageVerifiedAt))
 	}
-	fmt.Fprintf(stdout, "Authentication: %s (checked %s; %s)\n", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt), view.Authentication.Context)
+	authentication := fmt.Sprintf("%s (checked %s", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt))
+	if view.Authentication.Context != "" {
+		authentication += "; " + view.Authentication.Context
+	}
+	fmt.Fprintf(stdout, "Authentication: %s)\n", authentication)
 	fmt.Fprintf(stdout, "Background:    %s\n", view.Background)
 	if view.Paused {
 		fmt.Fprintln(stdout, "Collection:    paused")
@@ -93,6 +101,9 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stdout, "%s: %s (%d session(s)%s); hooks %s\n", appName(app.Name), app.State, app.Sessions, gaps, app.Hooks)
 		if !app.VerifiedAt.IsZero() {
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
+		}
+		if app.VerificationDetail != "" {
+			fmt.Fprintf(stdout, "  Read-back: %s\n", app.VerificationDetail)
 		}
 		if len(app.CaptureGaps) > 0 {
 			fmt.Fprintf(stdout, "  Capture gaps: %d; see status --json for details.\n", len(app.CaptureGaps))
@@ -141,7 +152,10 @@ func readStatus(env Env) (view statusView, err error) {
 	if view.Authentication.ConfigurationID != "" && view.Authentication.ConfigurationID != view.ConfigurationID {
 		view.Authentication.State = "stale_configuration"
 	}
-	if view.Authentication.State == "verified" && env.now().Sub(view.Authentication.CheckedAt) > 5*time.Minute {
+	// The background probe only runs while collection is active, so a paused
+	// install keeps its last known state (with its checked time) rather than
+	// being called stale for a check that was deliberately not repeated.
+	if !cfg.Paused && view.Authentication.State == "verified" && env.now().Sub(view.Authentication.CheckedAt) > storageHealthStaleAfter {
 		view.Authentication.State = "stale"
 	}
 	view.Paused = cfg.Paused
@@ -168,6 +182,7 @@ func readStatus(env Env) (view statusView, err error) {
 	}
 	for _, name := range cfg.Harnesses {
 		app := appStatus{Name: name, State: "waiting for first session", Configured: true, Trust: "unknown", VerificationState: "not_verified"}
+		readBackIssue := ""
 		for _, reg := range regs {
 			if reg.Harness.Name != name || !cfg.AcceptSession(reg) {
 				continue
@@ -231,6 +246,13 @@ func readStatus(env Env) (view statusView, err error) {
 					app.State = "published; source verified"
 				} else if !verification.VerifiedAt.IsZero() {
 					app.VerificationState = "stale"
+				} else if verification.ConfigurationID == view.ConfigurationID && verification.PublishedAt.Equal(at) && verification.Attempts > 0 {
+					// The collector tried and could not read this publication
+					// back; a mismatch outranks a transient failure.
+					if verification.Outcome == verificationOutcomeMismatch || readBackIssue != verificationOutcomeMismatch {
+						readBackIssue = verification.Outcome
+						app.VerificationDetail = fmt.Sprintf("%s: %s (attempt %d; next retry %s)", verification.Outcome, verification.LastError, verification.Attempts, formatTimeOrNever(verification.NextRetryAt))
+					}
 				}
 				if at.After(app.LastPublishedAt) {
 					app.LastPublishedAt = at
@@ -241,6 +263,12 @@ func readStatus(env Env) (view statusView, err error) {
 		if app.Published && !app.ReadBackVerified {
 			app.State = "published; read-back pending"
 			app.VerificationState = "incomplete"
+			switch readBackIssue {
+			case verificationOutcomeMismatch:
+				app.VerificationState = "read_back_mismatch"
+			case verificationOutcomeFailed:
+				app.VerificationState = "read_back_failed"
+			}
 		}
 		view.Apps = append(view.Apps, app)
 	}
