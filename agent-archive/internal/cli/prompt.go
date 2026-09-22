@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // prompter handles terminal and redirected input without echoing secrets.
@@ -17,6 +18,16 @@ type prompter struct {
 	in     *bufio.Reader
 	out    io.Writer
 	source io.Reader
+	now    func() time.Time
+}
+
+// clock returns the prompter's injected clock, or the wall clock when none
+// was provided.
+func (p *prompter) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 func newPrompter(in io.Reader, out io.Writer) *prompter {

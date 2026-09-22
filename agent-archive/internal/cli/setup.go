@@ -67,6 +67,7 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 		return err
 	}
 	p := newPrompter(stdin, out)
+	p.now = env.now
 	if !found {
 		fmt.Fprintln(out, "You’ll need a private Cloudflare R2 or Amazon S3 bucket. Type help at the storage prompt for instructions.")
 	}
@@ -226,6 +227,7 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 				}
 				continue
 			}
+			draft.Config.BucketPrivacy = inspectBucketPrivacy(draft.Config, store, env.now())
 			draft.Config.StorageVerifiedAt = env.now().UTC()
 			verifiedStorage = draft.Config.Storage
 			fmt.Fprintln(out, "Connected.")

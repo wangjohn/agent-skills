@@ -39,7 +39,14 @@ func showSetupReview(p *prompter, cfg config.Config, reconfiguring bool) {
 		fmt.Fprintln(p.out, "\nSave new sessions, with or without skills.")
 	}
 	fmt.Fprintf(p.out, "Automatically delete archived sessions after %d days.\n", cfg.RetentionDays)
-	fmt.Fprintln(p.out, "Filtering is best effort; sensitive text may remain. Bucket privacy has not been verified.")
+	fmt.Fprintln(p.out, "Filtering is best effort; sensitive text may remain.")
+	printReviewPrivacy(p, cfg)
+}
+
+// printReviewPrivacy reports the saved bucket privacy evidence as of the
+// prompter's clock, so the review screen agrees with status output.
+func printReviewPrivacy(p *prompter, cfg config.Config) {
+	printBucketPrivacy(p.out, currentBucketPrivacy(cfg, p.clock()))
 }
 
 func reviewAction(p *prompter, label string) (string, error) {

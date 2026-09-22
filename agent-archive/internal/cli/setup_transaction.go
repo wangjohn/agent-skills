@@ -16,6 +16,7 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/credentials"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 type setupJournal struct {
@@ -161,8 +162,14 @@ func applySetup(home, userHome, executable string, old config.Config, next *conf
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current, old) {
+	// The background collector refreshes bucket privacy evidence in place
+	// while setup is open. It is evidence, not a setting, so it neither counts
+	// as a concurrent change nor gets overwritten by an older draft report.
+	if !reflect.DeepEqual(withoutBucketPrivacy(current), withoutBucketPrivacy(old)) {
 		return fmt.Errorf("settings changed while setup was open; restart setup to review the current settings")
+	}
+	if fresher := freshestBucketPrivacy(*next, current.BucketPrivacy); fresher != nil {
+		next.BucketPrivacy = fresher
 	}
 	// Operational ownership comes from committed state, never a resumable
 	// draft. A crash after commit can leave a pre-commit draft on disk.
@@ -345,4 +352,21 @@ func recoverSetup(home string, env Env) error {
 	}
 	defer releaseHooks()
 	return restoreSetup(home, journal, env)
+}
+
+func withoutBucketPrivacy(cfg config.Config) config.Config {
+	cfg.BucketPrivacy = nil
+	return cfg
+}
+
+// freshestBucketPrivacy returns the newer of cfg's own report and candidate
+// when candidate was checked for cfg's storage configuration, otherwise nil.
+func freshestBucketPrivacy(cfg config.Config, candidate *storage.PrivacyReport) *storage.PrivacyReport {
+	if candidate == nil || candidate.CheckedAt == nil || candidate.ConfigurationID != privacyConfigurationID(cfg) {
+		return nil
+	}
+	if own := cfg.BucketPrivacy; own != nil && own.CheckedAt != nil && own.ConfigurationID == candidate.ConfigurationID && !own.CheckedAt.Before(*candidate.CheckedAt) {
+		return nil
+	}
+	return candidate
 }

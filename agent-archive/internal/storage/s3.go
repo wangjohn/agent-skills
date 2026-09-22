@@ -20,6 +20,7 @@ import (
 // as Cloudflare R2. The SDK client is injected so tests can use a fake HTTP
 // server without credentials or a bucket administrator account.
 type S3Store struct {
+	provider    string
 	client      *s3.Client
 	bucket      string
 	prefix      string
@@ -29,6 +30,9 @@ type S3Store struct {
 // S3StoreOptions configures a store. Client must be constructed with the
 // desired credential provider; this package never reads credentials itself.
 type S3StoreOptions struct {
+	// Provider is s3 or r2 (compared case- and space-insensitively); empty is
+	// unknown for custom endpoints.
+	Provider     string
 	Client       *s3.Client
 	Bucket       string
 	Prefix       string
@@ -59,7 +63,7 @@ func NewS3Store(options S3StoreOptions) (*S3Store, error) {
 	if maxGetBytes <= 0 {
 		maxGetBytes = 64 << 20
 	}
-	return &S3Store{client: options.Client, bucket: options.Bucket, prefix: strings.Trim(options.Prefix, "/"), maxGetBytes: maxGetBytes}, nil
+	return &S3Store{provider: strings.ToLower(strings.TrimSpace(options.Provider)), client: options.Client, bucket: options.Bucket, prefix: strings.Trim(options.Prefix, "/"), maxGetBytes: maxGetBytes}, nil
 }
 
 // NewClient constructs an S3 client for AWS or an S3-compatible endpoint.
@@ -236,5 +240,5 @@ func NewConfiguredStore(ctx context.Context, cfg credentials.Config, keychain cr
 		return nil, err
 	}
 	client := NewClient(awsCfg, endpoint, true, 3)
-	return NewS3Store(S3StoreOptions{Client: client, Bucket: cfg.Bucket, Prefix: cfg.Prefix, Endpoint: endpoint, UsePathStyle: true})
+	return NewS3Store(S3StoreOptions{Provider: cfg.Provider, Client: client, Bucket: cfg.Bucket, Prefix: cfg.Prefix, Endpoint: endpoint, UsePathStyle: true})
 }
