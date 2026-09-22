@@ -112,6 +112,24 @@ Macs are supported.
    launchd knows the scheduled job; `running` means a pass is executing.
    Configuration alone never establishes capture or trust. Status uses local
    evidence and a read-only launchd check, without downloading conversations.
+   `status --json` separates configured, hook-observed, captured, published,
+   and read-back-verified evidence. Verification includes its timestamp and
+   configuration identity; it describes the checked publication, not continuous
+   remote monitoring. The background collector checks storage access with one
+   synthetic round trip for a new configuration, retries failed checks, and
+   refreshes the check after four minutes; status calls a verified check stale
+   after ten minutes unless collection is paused, when the last check is shown
+   with its time. A publication that cannot be read back is retried with
+   increasing delays (one minute up to a day), at most five per pass, oldest
+   first; it is reported by status as pending, failed, or mismatched, and does
+   not fail `sync`.
+   Authentication evidence identifies whether it came from manual sync or the
+   background environment. Unexposed app versions and trust remain unknown.
+
+   Setup retires the old `com.agent-skills.skill-runs-upload` job only when
+   its label and command match the prototype. It keeps the prototype's private
+   records. Failed setup restores that job; an unrecognized job at the old path
+   is preserved and reported for manual resolution.
 
 ## Routine use and recovery
 

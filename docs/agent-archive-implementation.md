@@ -1,5 +1,37 @@
 # Agent Archive implementation and verification ledger
 
+## September 21 audit follow-up
+
+The historical progress notes below describe earlier slices. The following PRs
+close the subsequent implementation audit; they are open for review, not merged.
+
+| PR | Change | Base |
+| --- | --- | --- |
+| [#24](https://github.com/wangjohn/agent-skills/pull/24) | Exact pending bytes, hook evidence retention, safe request acknowledgement, fixed capture boundary and rewrite protection | main |
+| [#25](https://github.com/wangjohn/agent-skills/pull/25) | Parser-only metadata regeneration from retained source; preserve richer unpublished candidates | #24 |
+| [#26](https://github.com/wangjohn/agent-skills/pull/26) | Bounded skill observations and version history, explicit feedback, filtered hook-only final/model fields | #25 |
+| [#27](https://github.com/wangjohn/agent-skills/pull/27) | Separate read-back evidence, configuration identity, authentication freshness, capture diagnostics, transactional prototype job migration | #26 |
+| [#22](https://github.com/wangjohn/agent-skills/pull/22) | Current/predecessor retention and metadata-first expiry with interruption recovery | main |
+| [#23](https://github.com/wangjohn/agent-skills/pull/23) | Fail-closed signing and accepted notarization gate for tagged releases | main |
+
+Review/merge the stack in order #24 → #25 → #26 → #27. Retention and release
+changes are independent. Retarget dependent PRs to main as their bases merge.
+
+The combined stack passed `go test -race ./...`, `go vet ./...`, repository
+skill validation, all 15 Python prototype tests, and the release-gate regression.
+Both Intel and Apple Silicon development executables built; Intel version/help
+commands ran on this host. ARM runtime execution was not available on this host.
+These were synthetic tests. No private session was uploaded and no real app
+hooks were installed for validation.
+
+Live acceptance remains separate: synthetic R2 round trips first; AWS is deferred
+by the user. Actual app trust/capture, launchd and background Keychain behavior,
+a second physical Mac, measured end-to-end hook latency, and Apple-signed and
+notarized downloads remain unverified. Filesystem inventory is explicitly
+installed-only evidence, with coverage gaps for uninspected roots/plugins.
+Evaluate Skill recommendations remain separate work as specified in the plan.
+
+
 Source of requirements: [engineering specification](agent-run-archive-spec.md).
 
 Status: implementation in progress. Passing synthetic tests does not establish live application or cloud compatibility. Entries remain incomplete until reviewed evidence exists.

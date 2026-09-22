@@ -771,6 +771,37 @@ func TestForgetSessionRemovesRequestLock(t *testing.T) {
 	}
 }
 
+func TestForgetSessionRemovesVerificationRecordAndEmptyDirectory(t *testing.T) {
+	store := newTestStore(t)
+	dir := store.SessionDir("session-1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "verification.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ForgetSession("session-1", "native-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("per-session directory leaked after ForgetSession: %v", err)
+	}
+	// Anything unexpected in the directory is preserved, not deleted blindly.
+	other := store.SessionDir("session-2")
+	if err := os.MkdirAll(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "notes.txt"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ForgetSession("session-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "notes.txt")); err != nil {
+		t.Fatalf("unrelated file removed: %v", err)
+	}
+}
+
 func TestRunIgnoresIncompleteFinalJSONLRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)

@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"github.com/wangjohn/agent-skills/agent-archive/internal/hooks"
+
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,8 +33,7 @@ func detectHarnesses(userHome string) []string {
 // collection starts immediately rather than waiting for the next login.
 // This shells out to launchctl and has not been verified against a real
 // launchd (see docs/agent-archive-implementation.md); a failure here is
-// reported to the user as a warning, not a setup failure, since the plist
-// is already written and will load on the next login regardless.
+// reported as an incomplete setup, with rollback and a retry path.
 func loadLaunchAgent(plistPath string) error {
 	cmd := exec.Command("launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), plistPath)
 	output, err := cmd.CombinedOutput()
@@ -66,7 +65,7 @@ func (e Env) jobState(plist string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), hooks.LaunchLabel)).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), strings.TrimSuffix(filepath.Base(plist), ".plist"))).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(output), "Could not find service") {
 			return "missing"

@@ -19,6 +19,7 @@ import (
 )
 
 type setupJournal struct {
+	Legacy    *legacyJob     `json:"legacy,omitempty"`
 	Changes   []hooks.Change `json:"changes"`
 	Plist     string         `json:"plist"`
 	WasLoaded bool           `json:"was_loaded"`
@@ -255,7 +256,11 @@ func applySetup(home, userHome, executable string, old config.Config, next *conf
 	if job == "unknown" && old.MachineID != "" {
 		return fmt.Errorf("cannot determine previous background job state; restore access to launchctl and retry")
 	}
-	journal := setupJournal{Changes: changes, Plist: plistPath, WasLoaded: job == "loaded" || job == "running"}
+	legacy, err := planLegacyMigration(userHome, env)
+	if err != nil {
+		return err
+	}
+	journal := setupJournal{Legacy: legacy, Changes: changes, Plist: plistPath, WasLoaded: job == "loaded" || job == "running"}
 	if err = local.Write(journalPath(home), journal); err != nil {
 		return err
 	}
@@ -271,6 +276,9 @@ func applySetup(home, userHome, executable string, old config.Config, next *conf
 		}
 	}
 	if err = hooks.Apply(changes); err != nil {
+		return fail(err)
+	}
+	if err = retireLegacyJob(journal.Legacy, env); err != nil {
 		return fail(err)
 	}
 	if err = env.loadLaunchAgent(plistPath); err != nil {
@@ -311,6 +319,9 @@ func restoreSetup(home string, journal setupJournal, env Env) error {
 		if err := env.loadLaunchAgent(journal.Plist); err != nil {
 			return err
 		}
+	}
+	if err := restoreLegacyJob(journal.Legacy, env); err != nil {
+		return err
 	}
 	return os.Remove(journalPath(home))
 }

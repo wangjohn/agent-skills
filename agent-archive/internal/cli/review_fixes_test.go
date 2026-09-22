@@ -356,7 +356,7 @@ func TestBlockedCaptureIsNotPendingAndStatusReportsGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Collector.LastError != "" || after.Collector.PendingCount != 0 || after.Apps[0].CaptureGaps != 1 || !after.Apps[0].LastPublishedAt.Equal(before.Apps[0].LastPublishedAt) || after.Apps[0].State != "published; source verified" {
+	if after.Collector.LastError != "" || after.Collector.PendingCount != 0 || len(after.Apps[0].CaptureGaps) != 1 || !after.Apps[0].LastPublishedAt.Equal(before.Apps[0].LastPublishedAt) || after.Apps[0].State != "published; source verified" {
 		t.Fatalf("status=%+v", after)
 	}
 	var out strings.Builder
