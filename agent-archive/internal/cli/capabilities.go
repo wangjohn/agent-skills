@@ -31,12 +31,34 @@ type captureCapabilities struct {
 }
 
 type applicationDiscovery struct {
-	Installed     bool      `json:"installed"`
-	Version       string    `json:"version,omitempty"`
-	VersionSource string    `json:"version_source,omitempty"`
-	VersionState  string    `json:"version_state"`
-	ObservedAt    time.Time `json:"observed_at"`
+	Installed     bool   `json:"installed"`
+	Version       string `json:"version,omitempty"`
+	VersionSource string `json:"version_source,omitempty"`
+	// VersionKind names the numbering scheme the discovered version belongs
+	// to: versionKindCLI for a `--version` answer, versionKindAppBundle for a
+	// macOS bundle's CFBundleShortVersionString. Captures report the harness's
+	// own version (Codex cli_version, Claude Code record version, Cursor hook
+	// cursor_version), which may be numbered differently from an app bundle.
+	VersionKind  string    `json:"version_kind,omitempty"`
+	VersionState string    `json:"version_state"`
+	ObservedAt   time.Time `json:"observed_at"`
 }
+
+const (
+	versionKindCLI       = "cli"
+	versionKindAppBundle = "app_bundle"
+)
+
+// Reason codes for installed_version_support = unverified. They are an API.
+const (
+	supportReasonNoVerifiedCapture = "no_verified_capture"
+	supportReasonNoMatchingVersion = "no_matching_verified_version"
+	// supportReasonVersionSourceMismatch: the installed version and every
+	// verified capture's version follow different numbering schemes (for
+	// example a Cursor app-bundle version against the hook's cursor_version),
+	// so they cannot match even when the same build produced both.
+	supportReasonVersionSourceMismatch = "version_source_mismatch"
+)
 
 func applicationDiscoveriesPath(home string) string {
 	return filepath.Join(home, "application-versions.json")
@@ -105,7 +127,12 @@ func discoverApplications(userHome string) map[string]applicationDiscovery {
 	}
 }
 
+// discoverCommandVersion tries each candidate in order. A candidate that is
+// present but fails to answer does not stop discovery; only when every present
+// candidate fails is the version unknown, and only when none is present is the
+// application absent.
 func discoverCommandVersion(name string, candidates [][]string) applicationDiscovery {
+	present := false
 	for _, original := range candidates {
 		candidate := append([]string(nil), original...)
 		path := candidate[0]
@@ -118,11 +145,13 @@ func discoverCommandVersion(name string, candidates [][]string) applicationDisco
 		} else {
 			continue
 		}
-		version, ok := boundedVersionCommand(candidate...)
-		if ok {
-			return applicationDiscovery{Installed: true, Version: version, VersionSource: candidate[0] + " --version", VersionState: "observed"}
+		present = true
+		if version, ok := boundedVersionCommand(candidate...); ok {
+			return applicationDiscovery{Installed: true, Version: version, VersionSource: candidate[0] + " --version", VersionKind: versionKindCLI, VersionState: "observed"}
 		}
-		return applicationDiscovery{Installed: true, VersionSource: name + " --version", VersionState: "unknown"}
+	}
+	if present {
+		return applicationDiscovery{Installed: true, VersionSource: name + " --version", VersionKind: versionKindCLI, VersionState: "unknown"}
 	}
 	return applicationDiscovery{VersionState: "absent"}
 }
@@ -135,9 +164,9 @@ func discoverCursorVersion(userHome string) applicationDiscovery {
 		plist := filepath.Join(bundle, "Contents", "Info.plist")
 		version, ok := boundedVersionCommand("/usr/bin/plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", plist)
 		if ok {
-			return applicationDiscovery{Installed: true, Version: version, VersionSource: plist + ":CFBundleShortVersionString", VersionState: "observed"}
+			return applicationDiscovery{Installed: true, Version: version, VersionSource: plist + ":CFBundleShortVersionString", VersionKind: versionKindAppBundle, VersionState: "observed"}
 		}
-		return applicationDiscovery{Installed: true, VersionSource: plist, VersionState: "unknown"}
+		return applicationDiscovery{Installed: true, VersionSource: plist, VersionKind: versionKindAppBundle, VersionState: "unknown"}
 	}
 	return applicationDiscovery{VersionState: "absent"}
 }
@@ -164,32 +193,68 @@ func boundedVersionCommand(argv ...string) (string, bool) {
 }
 
 func installedVersionSupport(discovery applicationDiscovery, verifiedVersions []string) string {
-	if !discovery.Installed {
-		if discovery.VersionState != "absent" {
-			return "unknown"
-		}
-		return "absent"
-	}
-	if discovery.Version == "" || discovery.VersionState == "stale" {
-		return "unknown"
-	}
-	installed := normalizedVersion(discovery.Version)
-	for _, version := range verifiedVersions {
-		if installed != "" && installed == normalizedVersion(version) {
-			return "verified_by_capture"
-		}
-	}
-	return "unverified"
+	state, _ := installedVersionSupportDetail(discovery, verifiedVersions)
+	return state
 }
 
-var versionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)(?:$|[^0-9A-Za-z.+-])`)
+// installedVersionSupportDetail reports the support state and, when it is
+// unverified, a reason code saying why the installed version is not matched by
+// a verified capture.
+func installedVersionSupportDetail(discovery applicationDiscovery, verifiedVersions []string) (string, string) {
+	if !discovery.Installed {
+		if discovery.VersionState != "absent" {
+			return "unknown", ""
+		}
+		return "absent", ""
+	}
+	if discovery.Version == "" || discovery.VersionState == "stale" {
+		return "unknown", ""
+	}
+	installed := normalizedVersion(discovery.Version)
+	if len(verifiedVersions) == 0 {
+		return "unverified", supportReasonNoVerifiedCapture
+	}
+	comparable := false
+	for _, version := range verifiedVersions {
+		verified := normalizedVersion(version)
+		if installed != "" && installed == verified {
+			return "verified_by_capture", ""
+		}
+		if versionShape(installed) == versionShape(verified) {
+			comparable = true
+		}
+	}
+	if !comparable {
+		return "unverified", supportReasonVersionSourceMismatch
+	}
+	return "unverified", supportReasonNoMatchingVersion
+}
 
+// versionPattern finds a dotted numeric version with an optional pre-release
+// or build suffix anywhere in a tool's `--version` answer, such as
+// "codex-cli 1.2.3", "v1.2.3", or "1.2.3.4".
+var versionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z.-]+)?)(?:$|[^0-9A-Za-z.+-])`)
+
+// normalizedVersion extracts the version number from a version answer. When
+// no dotted numeric version is present, the trimmed answer itself is the
+// version so opaque schemes still compare by exact text.
 func normalizedVersion(value string) string {
-	match := versionPattern.FindStringSubmatch(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	match := versionPattern.FindStringSubmatch(value)
 	if len(match) == 2 {
 		return match[1]
 	}
-	return ""
+	return value
+}
+
+// versionShape classifies a version as a dotted numeric string or an opaque
+// label. Two versions of different shapes come from different numbering
+// schemes and cannot be compared.
+func versionShape(value string) string {
+	if versionPattern.MatchString(value) {
+		return "dotted"
+	}
+	return "opaque"
 }
 
 type cappedBuffer struct{ bytes.Buffer }

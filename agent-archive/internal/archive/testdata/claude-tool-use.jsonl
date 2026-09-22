@@ -1,1 +1,1 @@
-{"type":"assistant","uuid":"claude-a","timestamp":"2026-09-17T18:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"I will check it."},{"type":"thinking","text":"hidden thought"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}
+{"version":"1.0.83","type":"assistant","uuid":"claude-a","timestamp":"2026-09-17T18:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"I will check it."},{"type":"thinking","text":"hidden thought"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}

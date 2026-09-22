@@ -172,7 +172,15 @@ func handleSessionStart(home string, store *collector.LocalStore, cfg config.Con
 			if !cfg.AcceptSession(existing) {
 				return nil
 			}
-			if canonicalHarness(existing.Harness.Name) != canonicalHarness(harness) || (root != "" && root != existing.ProjectRoot) {
+			// Claude Code's hook cwd follows the session's working
+			// directory (a persisted `cd`), so a continuation may report a
+			// subdirectory of the project it started in. Match on project
+			// identity: only a different harness or a different configured
+			// project is a conflict.
+			if canonicalHarness(existing.Harness.Name) != canonicalHarness(harness) {
+				return fmt.Errorf("session identity conflicts with the accepted registration")
+			}
+			if configured, ok := configuredProjectFor(cfg, root); ok && filepath.Clean(configured) != filepath.Clean(existing.ProjectRoot) {
 				return fmt.Errorf("session identity conflicts with the accepted registration")
 			}
 			if transcriptPath != "" {
@@ -198,21 +206,21 @@ func handleSessionStart(home string, store *collector.LocalStore, cfg config.Con
 	if !included {
 		return nil
 	}
+	// The diagnostic names the most specific reason capture was declined:
+	// a project that is not yet active cannot capture any start, so check
+	// activation before asking whether this start is provably fresh.
+	if !cfg.Archive.Eligible(root, now) {
+		return recordCaptureDiagnostic(home, captureDiagnostic{
+			Code: diagnosticPreActivationStart, Harness: canonicalHarness(harness),
+			ProjectRoot: root, ObservedAt: now,
+		})
+	}
 	// Codex and Claude document an explicit fresh-start source. Cursor's
 	// version field does not prove that an unknown session began after
 	// activation; until native start provenance is verified, leave it out.
 	if !provesFreshSessionStart(harness, payload) {
 		return recordCaptureDiagnostic(home, captureDiagnostic{
 			Code: diagnosticUnknownSessionStart, Harness: canonicalHarness(harness),
-			ProjectRoot: root, ObservedAt: now,
-		})
-	}
-	if root == "" {
-		return fmt.Errorf("hook payload for SessionStart has no project root")
-	}
-	if !cfg.Archive.Eligible(root, now) {
-		return recordCaptureDiagnostic(home, captureDiagnostic{
-			Code: diagnosticPreActivationStart, Harness: canonicalHarness(harness),
 			ProjectRoot: root, ObservedAt: now,
 		})
 	}
@@ -236,6 +244,45 @@ func handleSessionStart(home string, store *collector.LocalStore, cfg config.Con
 		return err
 	}
 	return saveLifecycleEvidence(store, archiveID, harness, "sessionstart", payload, now)
+}
+
+// configuredProjectFor returns the configured project root that owns root:
+// root itself or its nearest configured ancestor, comparing resolved paths so
+// a symlinked checkout still maps to the project it was registered under.
+// The returned root is the configured spelling, which registrations store.
+func configuredProjectFor(cfg config.Config, root string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	candidate := resolvedPath(root)
+	best, bestLen, found := "", -1, false
+	for _, project := range cfg.Archive.Projects {
+		configured := resolvedPath(project.Root)
+		if !pathWithin(candidate, configured) || len(configured) <= bestLen {
+			continue
+		}
+		best, bestLen, found = project.Root, len(configured), true
+	}
+	return best, found
+}
+
+func resolvedPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// pathWithin reports whether path is root or lies beneath it.
+func pathWithin(path, root string) bool {
+	if path == root {
+		return true
+	}
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		root += string(filepath.Separator)
+	}
+	return strings.HasPrefix(path, root)
 }
 
 func canonicalHarness(harness string) string {
@@ -367,9 +414,7 @@ func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event 
 	if len(filtered) == 0 {
 		return nil, nil
 	}
-	if len(gaps) > 0 {
-		filtered[0].Payload["redacted"] = true
-	}
+	archive.AnnotateSupplementalGaps(filtered[0].Payload, gaps)
 	return &filtered[0], nil
 }
 

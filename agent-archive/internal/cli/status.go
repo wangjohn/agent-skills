@@ -16,26 +16,41 @@ import (
 )
 
 type appStatus struct {
-	PublishedSessions       int                  `json:"published_sessions"`
-	VerifiedSessions        int                  `json:"verified_sessions"`
-	Configured              bool                 `json:"configured"`
-	HookObserved            bool                 `json:"hook_observed"`
-	CapturedLocally         bool                 `json:"captured_locally"`
-	Published               bool                 `json:"published"`
-	ReadBackVerified        bool                 `json:"read_back_verified"`
-	VerifiedAt              time.Time            `json:"verified_at,omitempty"`
-	VerificationState       string               `json:"verification_state"`
-	Trust                   string               `json:"trust"`
-	HarnessVersions         []string             `json:"observed_harness_versions,omitempty"`
-	AdapterVersions         []string             `json:"observed_adapter_versions,omitempty"`
-	CaptureGaps             []archive.CaptureGap `json:"capture_gaps,omitempty"`
-	Installed               bool                 `json:"installed"`
-	InstalledVersion        string               `json:"installed_version,omitempty"`
-	VersionSource           string               `json:"installed_version_source,omitempty"`
-	VersionObservedAt       time.Time            `json:"installed_version_observed_at,omitempty"`
-	VersionState            string               `json:"installed_version_state"`
-	VersionSupport          string               `json:"installed_version_support"`
-	Capabilities            captureCapabilities  `json:"capabilities"`
+	PublishedSessions int       `json:"published_sessions"`
+	VerifiedSessions  int       `json:"verified_sessions"`
+	Configured        bool      `json:"configured"`
+	HookObserved      bool      `json:"hook_observed"`
+	CapturedLocally   bool      `json:"captured_locally"`
+	Published         bool      `json:"published"`
+	ReadBackVerified  bool      `json:"read_back_verified"`
+	VerifiedAt        time.Time `json:"verified_at,omitempty"`
+	VerificationState string    `json:"verification_state"`
+	// VerificationDetail explains a read-back that has not succeeded yet for
+	// the current publication: the last error, attempts so far, and when the
+	// collector will retry. Empty once every publication is verified.
+	VerificationDetail string   `json:"verification_detail,omitempty"`
+	Trust              string   `json:"trust"`
+	HarnessVersions    []string `json:"observed_harness_versions,omitempty"`
+	AdapterVersions    []string `json:"observed_adapter_versions,omitempty"`
+	// CaptureGaps lists recorded gaps: sessions whose current transcript can
+	// no longer be captured (rewritten or over the size limit), per-session
+	// scan issues, and gaps recorded inside captured bundles. A blocked
+	// session's last published snapshot, if any, stays retained. These are
+	// recorded gaps, not errors.
+	CaptureGaps       []archive.CaptureGap `json:"capture_gaps,omitempty"`
+	Installed         bool                 `json:"installed"`
+	InstalledVersion  string               `json:"installed_version,omitempty"`
+	VersionSource     string               `json:"installed_version_source,omitempty"`
+	VersionObservedAt time.Time            `json:"installed_version_observed_at,omitempty"`
+	VersionKind       string               `json:"installed_version_kind,omitempty"`
+	VersionState      string               `json:"installed_version_state"`
+	VersionSupport    string               `json:"installed_version_support"`
+	// VersionSupportReason is set when VersionSupport is unverified. Verified
+	// captures report the harness's own version (Codex cli_version, Claude
+	// Code record version, Cursor hook cursor_version) in HarnessVersions; the
+	// installed version comes from discovery and may be numbered differently.
+	VersionSupportReason    string              `json:"installed_version_support_reason,omitempty"`
+	Capabilities            captureCapabilities `json:"capabilities"`
 	verifiedHarnessVersions []string
 	Projects                []projectCaptureStatus `json:"projects"`
 
@@ -77,7 +92,10 @@ type statusView struct {
 	Apps               []appStatus         `json:"applications"`
 	Collector          collector.Status    `json:"collector"`
 	CaptureDiagnostics []captureDiagnostic `json:"capture_diagnostics,omitempty"`
-	Next               string              `json:"next_action"`
+	// Warnings lists advisory local files that could not be read; status
+	// still reports everything else.
+	Warnings []string `json:"warnings,omitempty"`
+	Next     string   `json:"next_action"`
 }
 
 func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
@@ -99,15 +117,23 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if view.Storage != "" {
 		fmt.Fprintf(stdout, "Storage:       %s\nAccess checked: %s (privacy not verified)\n", view.Storage, formatTimeOrNever(view.StorageVerifiedAt))
 	}
-	fmt.Fprintf(stdout, "Authentication: %s (checked %s; %s)\n", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt), view.Authentication.Context)
+	authentication := fmt.Sprintf("%s (checked %s", view.Authentication.State, formatTimeOrNever(view.Authentication.CheckedAt))
+	if view.Authentication.Context != "" {
+		authentication += "; " + view.Authentication.Context
+	}
+	fmt.Fprintf(stdout, "Authentication: %s)\n", authentication)
 	fmt.Fprintf(stdout, "Background:    %s\n", view.Background)
 	if view.Paused {
 		fmt.Fprintln(stdout, "Collection:    paused")
 	}
 	fmt.Fprintf(stdout, "Projects:      %d included\nPending:       %d session(s)\nLast scan:     %s\nLast publish:  %s\n", len(view.Projects), view.Collector.PendingCount, formatTimeOrNever(view.Collector.LastScanAt), formatTimeOrNever(view.Collector.LastPublishedAt))
 	for _, app := range view.Apps {
-		fmt.Fprintf(stdout, "%s: %s (%d session(s)); hooks %s\n", appName(app.Name), app.State, app.Sessions, app.Hooks)
-		fmt.Fprintf(stdout, "  Installed version: %s; support %s.\n", installedVersionLabel(app), app.VersionSupport)
+		gaps := ""
+		if len(app.CaptureGaps) > 0 {
+			gaps = fmt.Sprintf("; %d with a capture gap", len(app.CaptureGaps))
+		}
+		fmt.Fprintf(stdout, "%s: %s (%d session(s)%s); hooks %s\n", appName(app.Name), app.State, app.Sessions, gaps, app.Hooks)
+		fmt.Fprintf(stdout, "  Installed version: %s; support %s%s.\n", installedVersionLabel(app), app.VersionSupport, versionSupportNote(app))
 		if app.Capabilities.FreshStart.State == "unavailable" {
 			fmt.Fprintf(stdout, "  Fresh-start capture: unavailable. %s\n", app.Capabilities.FreshStart.NextAction)
 		}
@@ -116,6 +142,9 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		}
 		if !app.VerifiedAt.IsZero() {
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
+		}
+		if app.VerificationDetail != "" {
+			fmt.Fprintf(stdout, "  Read-back: %s\n", app.VerificationDetail)
 		}
 		if len(app.CaptureGaps) > 0 {
 			fmt.Fprintf(stdout, "  Capture gaps: %d; see status --json for details.\n", len(app.CaptureGaps))
@@ -127,8 +156,25 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if view.Collector.LastError != "" {
 		fmt.Fprintf(stdout, "Last error:    %s\n", view.Collector.LastError)
 	}
+	for _, warning := range view.Warnings {
+		fmt.Fprintf(stdout, "Warning:       %s\n", warning)
+	}
 	fmt.Fprintf(stdout, "\nNext: %s\n", view.Next)
 	return 0
+}
+
+// versionSupportNote explains an unverified installed version in the text
+// status without changing the support state or reason code.
+func versionSupportNote(app appStatus) string {
+	switch app.VersionSupportReason {
+	case supportReasonNoVerifiedCapture:
+		return " (no session from this version has been published and read back yet)"
+	case supportReasonNoMatchingVersion:
+		return " (verified sessions came from a different version)"
+	case supportReasonVersionSourceMismatch:
+		return " (installed version and captured versions use different numbering; cannot be compared)"
+	}
+	return ""
 }
 
 func installedVersionLabel(app appStatus) string {
@@ -174,6 +220,7 @@ func readStatus(env Env) (view statusView, err error) {
 	if err != nil {
 		return view, err
 	}
+	view.CaptureDiagnostics = includedCaptureDiagnostics(view.CaptureDiagnostics, cfg.Archive.Projects)
 	view.Authentication.State = "unknown"
 	if err := local.Read(filepath.Join(home, "storage-health.json"), &view.Authentication); err != nil && !os.IsNotExist(err) {
 		return view, err
@@ -181,7 +228,10 @@ func readStatus(env Env) (view statusView, err error) {
 	if view.Authentication.ConfigurationID != "" && view.Authentication.ConfigurationID != view.ConfigurationID {
 		view.Authentication.State = "stale_configuration"
 	}
-	if view.Authentication.State == "verified" && env.now().Sub(view.Authentication.CheckedAt) > 5*time.Minute {
+	// The background probe only runs while collection is active, so a paused
+	// install keeps its last known state (with its checked time) rather than
+	// being called stale for a check that was deliberately not repeated.
+	if !cfg.Paused && view.Authentication.State == "verified" && env.now().Sub(view.Authentication.CheckedAt) > storageHealthStaleAfter {
 		view.Authentication.State = "stale"
 	}
 	view.Paused = cfg.Paused
@@ -219,6 +269,7 @@ func readStatus(env Env) (view statusView, err error) {
 				ActivatedAt: project.ActivatedAt, Configured: true, VerificationState: "not_verified",
 			})
 		}
+		readBackIssue := ""
 		for _, reg := range regs {
 			if reg.Harness.Name != name || !cfg.AcceptSession(reg) {
 				continue
@@ -240,19 +291,30 @@ func readStatus(env Env) (view statusView, err error) {
 			if app.State == "waiting for first session" {
 				app.State = "hook observed; waiting for capture"
 			}
-			bundle, at, _, found, err := store.LoadPublished(reg.ArchiveSessionID)
+			bundle, at, state, found, err := store.LoadPublished(reg.ArchiveSessionID)
 			if err != nil {
 				return view, err
 			}
+			if state == collector.CacheStatusBlocked {
+				reason, _, e := store.LoadBlocked(reg.ArchiveSessionID)
+				if e != nil {
+					return view, e
+				}
+				app.CaptureGaps = append(app.CaptureGaps, archive.CaptureGap{Code: string(reason), Detail: "The current transcript can no longer be captured; the last published snapshot, if any, stays retained."})
+			}
 			if found {
-				app.CapturedLocally = true
-				pair.CapturedLocally = true
+				if state != collector.CacheStatusBlocked {
+					app.CapturedLocally = true
+					pair.CapturedLocally = true
+				}
 				app.CaptureGaps = append(app.CaptureGaps, bundle.Capture.Gaps...)
 				if version := bundle.Capture.AdapterVersion; version != "" && !containsString(app.AdapterVersions, version) {
 					app.AdapterVersions = append(app.AdapterVersions, version)
 				}
 			}
-			if found && app.LastPublishedAt.IsZero() {
+			// A blocked session with no publication has captured nothing;
+			// one that was published earlier still counts as published below.
+			if found && state != collector.CacheStatusBlocked && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
 			publishedBundle, actualAt, published, e := store.LoadLastPublished(reg.ArchiveSessionID)
@@ -271,7 +333,8 @@ func readStatus(env Env) (view statusView, err error) {
 				if e != nil {
 					return view, e
 				}
-				if verification.ConfigurationID == sessionVerificationConfigurationID(cfg, reg) && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
+				verificationConfigurationID := sessionVerificationConfigurationID(cfg, reg)
+				if verification.ConfigurationID == verificationConfigurationID && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
 					app.VerifiedSessions++
 					pair.VerifiedSessions++
 					if verification.VerifiedAt.After(pair.VerifiedAt) {
@@ -287,6 +350,13 @@ func readStatus(env Env) (view statusView, err error) {
 					}
 				} else if !verification.VerifiedAt.IsZero() {
 					app.VerificationState = "stale"
+				} else if verification.ConfigurationID == verificationConfigurationID && verification.PublishedAt.Equal(at) && verification.Attempts > 0 {
+					// The collector tried and could not read this publication
+					// back; a mismatch outranks a transient failure.
+					if verification.Outcome == verificationOutcomeMismatch || readBackIssue != verificationOutcomeMismatch {
+						readBackIssue = verification.Outcome
+						app.VerificationDetail = fmt.Sprintf("%s: %s (attempt %d; next retry %s)", verification.Outcome, verification.LastError, verification.Attempts, formatTimeOrNever(verification.NextRetryAt))
+					}
 				}
 				if at.After(app.LastPublishedAt) {
 					app.LastPublishedAt = at
@@ -316,6 +386,12 @@ func readStatus(env Env) (view statusView, err error) {
 		if app.Published && !app.ReadBackVerified {
 			app.State = "published; read-back pending"
 			app.VerificationState = "incomplete"
+			switch readBackIssue {
+			case verificationOutcomeMismatch:
+				app.VerificationState = "read_back_mismatch"
+			case verificationOutcomeFailed:
+				app.VerificationState = "read_back_failed"
+			}
 		}
 		view.Apps = append(view.Apps, app)
 	}
@@ -326,7 +402,10 @@ func readStatus(env Env) (view statusView, err error) {
 	executable, executableErr := env.executable()
 	discovered, err := readApplicationDiscoveries(home)
 	if err != nil {
-		return view, err
+		// Advisory only: a damaged observation file degrades installed
+		// versions to unknown rather than hiding the rest of the status.
+		view.Warnings = append(view.Warnings, fmt.Sprintf("Installed versions could not be read from %s: %v. Run agent-archive setup to refresh them.", applicationDiscoveriesPath(home), err))
+		discovered = map[string]applicationDiscovery{}
 	}
 	for i := range view.Apps {
 		appDiscovery := discovered[view.Apps[i].Name]
@@ -340,9 +419,10 @@ func readStatus(env Env) (view statusView, err error) {
 		view.Apps[i].InstalledVersion = appDiscovery.Version
 		view.Apps[i].VersionSource = appDiscovery.VersionSource
 		view.Apps[i].VersionObservedAt = appDiscovery.ObservedAt
+		view.Apps[i].VersionKind = appDiscovery.VersionKind
 		view.Apps[i].VersionState = appDiscovery.VersionState
 		view.Apps[i].Capabilities = captureCapabilityProfile(view.Apps[i].Name)
-		view.Apps[i].VersionSupport = installedVersionSupport(appDiscovery, view.Apps[i].verifiedHarnessVersions)
+		view.Apps[i].VersionSupport, view.Apps[i].VersionSupportReason = installedVersionSupportDetail(appDiscovery, view.Apps[i].verifiedHarnessVersions)
 		installed, e := hooks.Installed(userHome, executable, view.Apps[i].Name)
 		switch {
 		case e != nil || executableErr != nil:

@@ -134,8 +134,8 @@ func publishPairSession(t *testing.T, home string, store *collector.LocalStore, 
 	}
 	if verify {
 		env := testEnv(t, home, now)
-		if err := verifyPublications(home, cfg, env, store, remote, &result); err != nil || len(result.Errors) != 0 {
-			t.Fatalf("verify result=%#v err=%v", result, err)
+		if summary, err := verifyPublications(home, cfg, env, store, remote); err != nil || summary.Verified != 1 {
+			t.Fatalf("verify summary=%#v err=%v", summary, err)
 		}
 	}
 }
