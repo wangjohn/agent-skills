@@ -52,18 +52,19 @@ type statusView struct {
 	ConfigurationID string                `json:"configuration_id,omitempty"`
 	Authentication  storageHealth         `json:"authentication"`
 
-	Code              string           `json:"code"`
-	Version           int              `json:"schema_version"`
-	State             string           `json:"state"`
-	Storage           string           `json:"storage,omitempty"`
-	StorageVerifiedAt time.Time        `json:"storage_verified_at,omitempty"`
-	Privacy           string           `json:"privacy"`
-	Background        string           `json:"background"`
-	Paused            bool             `json:"paused"`
-	Projects          []string         `json:"projects"`
-	Apps              []appStatus      `json:"applications"`
-	Collector         collector.Status `json:"collector"`
-	Next              string           `json:"next_action"`
+	Code               string              `json:"code"`
+	Version            int                 `json:"schema_version"`
+	State              string              `json:"state"`
+	Storage            string              `json:"storage,omitempty"`
+	StorageVerifiedAt  time.Time           `json:"storage_verified_at,omitempty"`
+	Privacy            string              `json:"privacy"`
+	Background         string              `json:"background"`
+	Paused             bool                `json:"paused"`
+	Projects           []string            `json:"projects"`
+	Apps               []appStatus         `json:"applications"`
+	Collector          collector.Status    `json:"collector"`
+	CaptureDiagnostics []captureDiagnostic `json:"capture_diagnostics,omitempty"`
+	Next               string              `json:"next_action"`
 }
 
 func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
@@ -112,6 +113,9 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 			fmt.Fprintf(stdout, "  Capture gaps: %d; see status --json for details.\n", len(app.CaptureGaps))
 		}
 	}
+	for _, diagnostic := range view.CaptureDiagnostics {
+		fmt.Fprintf(stdout, "Capture skipped in %s (%s): %s at %s.\n", diagnostic.ProjectRoot, appName(diagnostic.Harness), captureDiagnosticMessage(diagnostic.Code), formatTimeOrNever(diagnostic.ObservedAt))
+	}
 	if view.Collector.LastError != "" {
 		fmt.Fprintf(stdout, "Last error:    %s\n", view.Collector.LastError)
 	}
@@ -150,6 +154,11 @@ func readStatus(env Env) (view statusView, err error) {
 	view.PrivacyEvidence = currentBucketPrivacy(cfg, env.now())
 	view.Privacy = view.PrivacyEvidence.State
 	view.ConfigurationID = configurationID(cfg)
+	view.CaptureDiagnostics, err = readCaptureDiagnostics(home)
+	if err != nil {
+		return view, err
+	}
+	view.CaptureDiagnostics = includedCaptureDiagnostics(view.CaptureDiagnostics, cfg.Archive.Projects)
 	view.Authentication.State = "unknown"
 	if err := local.Read(filepath.Join(home, "storage-health.json"), &view.Authentication); err != nil && !os.IsNotExist(err) {
 		return view, err

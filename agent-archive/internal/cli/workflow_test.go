@@ -34,7 +34,7 @@ func TestSyncEndToEndFromHookThroughPublish(t *testing.T) {
 	transcript := writeCodexTranscript(t, dir)
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestCollectCommandRunsQuietlyOnSuccess(t *testing.T) {
 	setUpTestConfig(t, home, dir, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	transcript := writeCodexTranscript(t, dir)
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestSyncRunsRetentionSweepAndDeletesExpiredSession(t *testing.T) {
 	}
 	transcript := writeCodexTranscript(t, dir)
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestSyncSurfacesRetentionErrorsInResultAndStatus(t *testing.T) {
 	}
 	transcript := writeCodexTranscript(t, dir)
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": dir, "transcript_path": transcript}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}

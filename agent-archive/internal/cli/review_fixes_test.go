@@ -81,7 +81,7 @@ func TestFailedScheduledUpdateBlocksDestinationSwitchUntilRetry(t *testing.T) {
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	setUpTestConfig(t, home, dir, now.Add(-time.Hour))
 	path := writeCodexTranscript(t, dir)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native", "cwd": dir, "transcript_path": path}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native", "cwd": dir, "transcript_path": path}, now); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _, err := config.Load(home)
@@ -139,7 +139,7 @@ func TestHookWaitsForOverlappingRegistration(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "overlap", "cwd": dir}, now)
+		done <- handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "overlap", "cwd": dir}, now)
 	}()
 	select {
 	case err := <-done:
@@ -279,7 +279,7 @@ func TestStatusPreservesPublicationDuringRateLimitedUpdate(t *testing.T) {
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), now)
 	setupRun(t, env, s3SetupInput("bucket", "us-east-1", "profile", true, false, false, project), 0)
 	path := writeCodexTranscript(t, project)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runOnePass(env, false); err != nil {
@@ -315,7 +315,7 @@ func TestBlockedCaptureIsNotPendingAndStatusReportsGap(t *testing.T) {
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), now)
 	setupRun(t, env, s3SetupInput("bucket", "us-east-1", "profile", true, false, false, project), 0)
 	path := writeCodexTranscript(t, project)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native", "cwd": project, "transcript_path": path}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runOnePass(env, false); err != nil {

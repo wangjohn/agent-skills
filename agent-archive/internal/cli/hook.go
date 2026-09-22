@@ -134,14 +134,14 @@ func handleHookEvent(home, harness string, payload map[string]any, now time.Time
 
 	switch kind {
 	case hookEventStart:
-		return handleSessionStart(store, cfg, harness, nativeSessionID, payload, now)
+		return handleSessionStart(home, store, cfg, harness, nativeSessionID, payload, now)
 	case hookEventStop, hookEventSubagentStop, hookEventResponse:
 		return handleSessionStop(store, harness, nativeSessionID, eventName, payload, now)
 	}
 	return nil
 }
 
-func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
+func handleSessionStart(home string, store *collector.LocalStore, cfg config.Config, harness, nativeSessionID string, payload map[string]any, now time.Time) error {
 	transcriptPath, _ := payload["transcript_path"].(string)
 	root := projectRoot(payload)
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
@@ -172,7 +172,20 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 			if !cfg.AcceptSession(existing) {
 				return nil
 			}
-			existing.TranscriptPath = transcriptPath
+			// Claude Code's hook cwd follows the session's working
+			// directory (a persisted `cd`), so a continuation may report a
+			// subdirectory of the project it started in. Match on project
+			// identity: only a different harness or a different configured
+			// project is a conflict.
+			if canonicalHarness(existing.Harness.Name) != canonicalHarness(harness) {
+				return fmt.Errorf("session identity conflicts with the accepted registration")
+			}
+			if configured, ok := configuredProjectFor(cfg, root); ok && filepath.Clean(configured) != filepath.Clean(existing.ProjectRoot) {
+				return fmt.Errorf("session identity conflicts with the accepted registration")
+			}
+			if transcriptPath != "" {
+				existing.TranscriptPath = transcriptPath
+			}
 			existing.RegisteredAt = now
 			applyHarnessObservation(&existing.Harness, harness, payload)
 			if err := store.SaveRegistration(existing); err != nil {
@@ -182,32 +195,34 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		}
 	}
 
-	// This native session ID has never been registered locally. Claude Code
-	// and Codex both document a "source" field on SessionStart that
-	// distinguishes a fresh conversation from a continuation of an earlier
-	// one (Codex: https://learn.chatgpt.com/docs/hooks.md, "Common input
-	// fields" and the SessionStart section; values "startup", "resume",
-	// "clear", "compact"). "resume" and "compact" both continue a
-	// conversation whose true start time we cannot establish from this
-	// event, so for a never-seen session the spec's guidance on older
-	// resumed sessions applies: leave it uncollected rather than guess. A
-	// "compact" of a session we already registered never reaches here; the
-	// found branch above keeps its original start time. "startup" and
-	// "clear" both begin a new conversation and are treated as fresh.
-	// Cursor does not document an equivalent signal, so a first-seen start
-	// for it is treated as fresh; this is a known simplification pending
-	// live verification against that harness (tracked in
-	// docs/agent-archive-implementation.md).
-	if harnessReportsSessionSource(harness) {
-		if source, _ := payload["source"].(string); sessionSourceContinuesEarlierConversation(source) {
-			return nil
+	// Ignore excluded projects without persisting their paths in diagnostics.
+	included := false
+	for _, project := range cfg.Archive.Projects {
+		if project.Included && filepath.Clean(project.Root) == filepath.Clean(root) {
+			included = true
+			break
 		}
 	}
-	if root == "" {
-		return fmt.Errorf("hook payload for SessionStart has no project root")
-	}
-	if !cfg.Archive.Eligible(root, now) {
+	if !included {
 		return nil
+	}
+	// The diagnostic names the most specific reason capture was declined:
+	// a project that is not yet active cannot capture any start, so check
+	// activation before asking whether this start is provably fresh.
+	if !cfg.Archive.Eligible(root, now) {
+		return recordCaptureDiagnostic(home, captureDiagnostic{
+			Code: diagnosticPreActivationStart, Harness: canonicalHarness(harness),
+			ProjectRoot: root, ObservedAt: now,
+		})
+	}
+	// Codex and Claude document an explicit fresh-start source. Cursor's
+	// version field does not prove that an unknown session began after
+	// activation; until native start provenance is verified, leave it out.
+	if !provesFreshSessionStart(harness, payload) {
+		return recordCaptureDiagnostic(home, captureDiagnostic{
+			Code: diagnosticUnknownSessionStart, Harness: canonicalHarness(harness),
+			ProjectRoot: root, ObservedAt: now,
+		})
 	}
 	archiveID, _, err := store.EnsureArchiveSessionID(nativeSessionID)
 	if err != nil {
@@ -229,6 +244,66 @@ func handleSessionStart(store *collector.LocalStore, cfg config.Config, harness,
 		return err
 	}
 	return saveLifecycleEvidence(store, archiveID, harness, "sessionstart", payload, now)
+}
+
+// configuredProjectFor returns the configured project root that owns root:
+// root itself or its nearest configured ancestor, comparing resolved paths so
+// a symlinked checkout still maps to the project it was registered under.
+// The returned root is the configured spelling, which registrations store.
+func configuredProjectFor(cfg config.Config, root string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	candidate := resolvedPath(root)
+	best, bestLen, found := "", -1, false
+	for _, project := range cfg.Archive.Projects {
+		configured := resolvedPath(project.Root)
+		if !pathWithin(candidate, configured) || len(configured) <= bestLen {
+			continue
+		}
+		best, bestLen, found = project.Root, len(configured), true
+	}
+	return best, found
+}
+
+func resolvedPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// pathWithin reports whether path is root or lies beneath it.
+func pathWithin(path, root string) bool {
+	if path == root {
+		return true
+	}
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		root += string(filepath.Separator)
+	}
+	return strings.HasPrefix(path, root)
+}
+
+func canonicalHarness(harness string) string {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	if harness == "claude-code" {
+		return "claude"
+	}
+	return harness
+}
+
+func provesFreshSessionStart(harness string, payload map[string]any) bool {
+	switch canonicalHarness(harness) {
+	case "codex", "claude":
+		source, _ := payload["source"].(string)
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "startup", "clear":
+			return true
+		}
+
+	}
+	return false
 }
 
 func applyHarnessObservation(target *archive.Harness, harness string, payload map[string]any) {
@@ -253,29 +328,6 @@ func saveLifecycleEvidence(store *collector.LocalStore, archiveID, harness, reas
 	return store.SaveRequest(archiveID, reason, now, *evidence)
 }
 
-// harnessReportsSessionSource reports whether the harness documents a
-// "source" field on its SessionStart payload. Claude Code and Codex do;
-// Cursor does not.
-func harnessReportsSessionSource(harness string) bool {
-	switch strings.ToLower(strings.TrimSpace(harness)) {
-	case "claude", "claude-code", "codex":
-		return true
-	}
-	return false
-}
-
-// sessionSourceContinuesEarlierConversation reports whether a documented
-// SessionStart "source" value means the event continues a conversation
-// that began earlier ("resume", "compact") rather than starting a new one
-// ("startup", "clear", or absent).
-func sessionSourceContinuesEarlierConversation(source string) bool {
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "resume", "compact":
-		return true
-	}
-	return false
-}
-
 func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {
 	archiveID, found, err := store.ArchiveSessionID(nativeSessionID)
 	if err != nil {
@@ -285,6 +337,16 @@ func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, ev
 		// Never registered (ineligible project, or a resume we declined to
 		// track): nothing to request.
 		return nil
+	}
+	registration, registered, err := store.LoadRegistration(archiveID)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		return nil
+	}
+	if canonicalHarness(registration.Harness.Name) != canonicalHarness(harness) {
+		return fmt.Errorf("session event does not match the accepted harness")
 	}
 	reason := strings.ToLower(eventName)
 	var evidence []archive.SupplementalEvidence

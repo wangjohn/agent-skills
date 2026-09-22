@@ -258,7 +258,7 @@ func TestSetupDestinationRejectsPendingAndRetiresPublishedSessions(t *testing.T)
 	env := setupTestEnv(t, home, t.TempDir(), newFakeKeychain(), time.Now())
 	setupRun(t, env, s3SetupInput("test-bucket", "us-east-1", "profile", true, false, false, project), 0)
 	now := env.now().Add(time.Second)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "one", "cwd": project, "transcript_path": writeCodexTranscript(t, project)}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,39 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/collector"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
 )
+
+func TestAmbiguousStartIsNotRegisteredAndDiagnosticIsContentFree(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		harness string
+		payload map[string]any
+	}{
+		{"codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "private-codex-id", "cwd": "/work/widget", "transcript_path": "/private/transcript.jsonl"}},
+		{"cursor", map[string]any{"hook_event_name": "sessionStart", "conversation_id": "private-cursor-id", "workspace_roots": []any{"/work/widget"}, "transcript_path": "/private/cursor.jsonl"}},
+	} {
+		if err := handleHookEvent(home, tc.harness, tc.payload, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, _ := collector.NewLocalStore(home)
+	regs, _ := store.LoadRegistrations()
+	if len(regs) != 0 {
+		t.Fatalf("ambiguous starts were registered: %#v", regs)
+	}
+	diagnostics, err := readCaptureDiagnostics(home)
+	if err != nil || len(diagnostics) != 2 {
+		t.Fatalf("diagnostics=%#v err=%v", diagnostics, err)
+	}
+	raw, err := os.ReadFile(captureDiagnosticsPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(raw) || bytes.Contains(raw, []byte("private-")) || bytes.Contains(raw, []byte("transcript")) {
+		t.Fatalf("diagnostic leaked session content or identity: %s", raw)
+	}
+}
 
 func setUpTestConfig(t *testing.T, home, projectRoot string, activatedAt time.Time) {
 	t.Helper()
@@ -55,7 +90,7 @@ func TestHandleHookEventRegistersEligibleSessionStart(t *testing.T) {
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
 	payload := map[string]any{
-		"hook_event_name": "SessionStart", "session_id": "native-1",
+		"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1",
 		"cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl",
 	}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
@@ -83,7 +118,7 @@ func TestHandleHookEventSkipsIneligibleProject(t *testing.T) {
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/somewhere/else"}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/somewhere/else"}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +224,7 @@ func TestHandleHookEventResumePreservesOriginalStartTime(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	firstStart := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl"}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl"}
 	if err := handleHookEvent(home, "claude", payload, firstStart); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +255,7 @@ func TestHandleHookEventStopWritesRequestWithEvidence(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	startPayload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}
+	startPayload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/work/widget"}
 	if err := handleHookEvent(home, "claude", startPayload, start); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +283,7 @@ func TestHandleHookEventCapturesSupportedFinalTextAfterFiltering(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
 		t.Fatal(err)
 	}
 	stop := map[string]any{"hook_event_name": "Stop", "session_id": "native-1", "turn_id": "t1", "model": "gpt-x", "last_assistant_message": "done token=synthetic-secret-value"}
@@ -275,7 +310,7 @@ func TestHandleHookEventLabelsSubagentFinalGapWithoutClaimingRedaction(t *testin
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
 		t.Fatal(err)
 	}
 	stop := map[string]any{"hook_event_name": "Stop", "session_id": "native-1", "turn_id": "t1", "agent_id": "sub-1", "last_assistant_message": "plain final text"}
@@ -301,10 +336,18 @@ func TestHandleHookEventLabelsSubagentFinalGapWithoutClaimingRedaction(t *testin
 	}
 }
 
-func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
+func TestAcceptedCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	store, _ := collector.NewLocalStore(home)
+	archiveID, _, err := store.EnsureArchiveSessionID("native-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveRegistration(archive.SessionRegistration{ArchiveSessionID: archiveID, NativeSessionID: "native-1", ProjectID: "synthetic-project", ProjectRoot: "/work/widget", Harness: archive.Harness{Name: "cursor"}, SessionStartedAt: now, RegisteredAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	start := map[string]any{"hook_event_name": "sessionStart", "conversation_id": "native-1", "workspace_roots": []any{"/work/widget"}, "cursor_version": "1.7.2", "composer_mode": "agent", "model": "label", "model_id": "model-x", "model_params": []any{map[string]any{"id": "effort", "value": "high"}}}
 	if err := handleHookEvent(home, "cursor", start, now); err != nil {
 		t.Fatal(err)
@@ -313,7 +356,6 @@ func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T)
 	if err := handleHookEvent(home, "cursor", response, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	store, _ := collector.NewLocalStore(home)
 	regs, _ := store.LoadRegistrations()
 	if len(regs) != 1 || regs[0].Harness.Version != "1.7.2" || regs[0].Harness.Mode != "agent" {
 		t.Fatalf("registration=%#v", regs)
@@ -361,7 +403,7 @@ func TestHandleHookEventIgnoresUnrelatedEvent(t *testing.T) {
 func TestHandleHookEventNoopWhenNotConfigured(t *testing.T) {
 	home := t.TempDir() // no config.Save call
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	payload := map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}
+	payload := map[string]any{"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1", "cwd": "/work/widget"}
 	if err := handleHookEvent(home, "claude", payload, now); err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +421,7 @@ func TestHandleHookEventNoopWhilePaused(t *testing.T) {
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
 	payload := map[string]any{
-		"hook_event_name": "SessionStart", "session_id": "native-1",
+		"hook_event_name": "SessionStart", "source": "startup", "session_id": "native-1",
 		"cwd": "/work/widget", "transcript_path": "/tmp/t.jsonl",
 	}
 	if err := handleHookEvent(home, "codex", payload, now); err != nil {
