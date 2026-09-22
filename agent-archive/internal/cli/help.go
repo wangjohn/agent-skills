@@ -59,6 +59,11 @@ Find sessions using metadata; does not download conversation content.
   --skill NAME                   Filter by skill
   --skill-sha256 HEX             Filter by exact lowercase skill SHA-256
   --skill-usage used|available|eligible_no_use
+                                 eligible_no_use cannot return sessions yet:
+                                 no parser version records both a complete
+                                 eligible-skill set and complete use
+                                 observation, so non-use is never proven. The
+                                 value stays accepted for forward compatibility.
   --since DATE|AGE               For example 2026-01-31 or 7d
   --complete                     Require complete parser coverage
 Example: agent-archive list --skill review-pr --skill-sha256 HASH --since 7d

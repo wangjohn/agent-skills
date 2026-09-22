@@ -157,10 +157,28 @@ func TestListFiltersExactSkillHashFromMetadataOnly(t *testing.T) {
 		if code := Run([]string{"list", "--skill", "review", "--skill-sha256", hash}, nil, &out, &errOut, env); code != 0 {
 			t.Fatalf("hash=%s code=%d stderr=%s", hash, code, errOut.String())
 		}
-		if !strings.Contains(out.String(), wantID) || strings.Contains(out.String(), rejectID+"\t") {
-			t.Fatalf("hash=%s output=%s", hash, out.String())
+		// One ID is a prefix of the other, and tabwriter pads columns with
+		// spaces rather than tabs, so a substring search for either ID is
+		// satisfied by the other session's row. Compare the listed rows.
+		listed := listedSessionIDs(out.String())
+		if len(listed) != 1 || listed[0] != wantID {
+			t.Fatalf("hash=%s listed=%v want=[%s] (reject %s)\n%s", hash, listed, wantID, rejectID, out.String())
 		}
 	}
+}
+
+// listedSessionIDs returns the session ID in the first column of each `list`
+// row, skipping the header and the trailing count line.
+func listedSessionIDs(out string) []string {
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] == "SESSION" || strings.HasSuffix(line, "session(s).") {
+			continue
+		}
+		ids = append(ids, fields[0])
+	}
+	return ids
 }
 
 func TestListRejectsBadArguments(t *testing.T) {
@@ -182,14 +200,56 @@ func TestListRejectsBadArguments(t *testing.T) {
 	}
 }
 
-func TestEligibleNoUseEmptyResultExplainsUnavailableEvidence(t *testing.T) {
+// An invalid --skill-usage value must be reported as the invalid value it is,
+// even though it also fails the "requires --skill or --skill-sha256" rule.
+func TestListReportsInvalidSkillUsageValueBeforeMissingSkillFlag(t *testing.T) {
 	env, _, _ := publishedFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"list", "--skill-usage", "bogus"}, nil, &out, &errOut, env); code != 2 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), `must be used, available, or eligible_no_use, not "bogus"`) {
+		t.Fatalf("wrong error for an invalid value: %s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "requires --skill") {
+		t.Fatalf("reported the missing companion flag instead: %s", errOut.String())
+	}
+	// A valid value still requires --skill or --skill-sha256.
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"list", "--skill-usage", "available"}, nil, &out, &errOut, env); code != 2 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "requires --skill or --skill-sha256") {
+		t.Fatalf("missing companion-flag error: %s", errOut.String())
+	}
+}
+
+// No parser version emits observed_none, so eligible_no_use can match no
+// sidecar. `list` must say that rather than print an empty result that reads
+// like an answer, and must still exit 0 with no rows.
+func TestEligibleNoUseSaysItCannotReturnSessionsYet(t *testing.T) {
+	env, _, id := publishedFixture(t)
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"list", "--skill", "review", "--skill-usage", "eligible_no_use"}, nil, &out, &errOut, env); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "does not prove no eligible sessions exist") {
-		t.Fatalf("missing unavailable-evidence explanation: %s", out.String())
+	for _, want := range []string{"cannot return sessions yet", "complete use observation", "forward compatibility"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("explanation missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), id) || strings.Contains(out.String(), "session(s).") {
+		t.Fatalf("listed rows for a query that cannot match:\n%s", out.String())
+	}
+	// The same words appear in `list --help`, so the flag's documentation
+	// and its behavior cannot drift apart.
+	var help bytes.Buffer
+	if code := Run([]string{"list", "--help"}, nil, &help, &errOut, env); code != 0 {
+		t.Fatalf("help code=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(help.String(), "eligible_no_use cannot return sessions yet") {
+		t.Fatalf("help does not say the value cannot return sessions:\n%s", help.String())
 	}
 }
 
