@@ -367,9 +367,7 @@ func filteredHookEvidence(kind archive.SupplementalEvidenceKind, harness, event 
 	if len(filtered) == 0 {
 		return nil, nil
 	}
-	if len(gaps) > 0 {
-		filtered[0].Payload["redacted"] = true
-	}
+	archive.AnnotateSupplementalGaps(filtered[0].Payload, gaps)
 	return &filtered[0], nil
 }
 

@@ -35,6 +35,14 @@ type ObjectStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// ObjectKeyer is implemented by stores that compose a full object key from a
+// relative archive key, such as S3Store applying its configured bucket
+// prefix. VerifyAccess uses it to report the exact object key in errors so a
+// user can find and remove a leftover setup-test object by hand.
+type ObjectKeyer interface {
+	ObjectKey(relative string) string
+}
+
 // Object is a listed object and intentionally contains no body. Downloading
 // content is an explicit Get operation.
 type Object struct {
@@ -87,26 +95,28 @@ func SHA256Hex(data []byte) string {
 }
 
 // VerifyAccess performs the setup round trip required by the product spec.
-// It creates a unique relative object key; the store applies its configured
-// prefix. It reads and verifies the object, confirms it
-// appears in List, and removes it. No bucket-admin operation is required.
+// It creates a unique relative object key and the store applies its
+// configured prefix. It reads and verifies the object, confirms it appears in
+// List, and removes it. No bucket-admin operation is required. Errors name
+// the full object key when the store implements ObjectKeyer.
 func VerifyAccess(ctx context.Context, store ObjectStore) error {
 	key := uniqueSetupKey()
+	label := setupKeyLabel(store, key)
 	payload := []byte(`{"agent_archive_setup_test":true}`)
 	cleanup := func() error { return store.Delete(ctx, key) }
 	if err := store.Put(ctx, key, payload); err != nil {
-		return withCleanupError(fmt.Errorf("setup test upload %q: %w", key, err), cleanup, key)
+		return withCleanupError(fmt.Errorf("setup test upload %s: %w", label, err), cleanup, label)
 	}
 	got, err := store.Get(ctx, key)
 	if err != nil {
-		return withCleanupError(fmt.Errorf("setup test read %q: %w", key, err), cleanup, key)
+		return withCleanupError(fmt.Errorf("setup test read %s: %w", label, err), cleanup, label)
 	}
 	if string(got) != string(payload) {
-		return withCleanupError(fmt.Errorf("setup test read %q: %w", key, ErrChecksumMismatch), cleanup, key)
+		return withCleanupError(fmt.Errorf("setup test read %s: %w", label, ErrChecksumMismatch), cleanup, label)
 	}
 	objects, err := store.List(ctx, key)
 	if err != nil {
-		return withCleanupError(fmt.Errorf("setup test list %q: %w", key, err), cleanup, key)
+		return withCleanupError(fmt.Errorf("setup test list %s: %w", label, err), cleanup, label)
 	}
 	found := false
 	for _, obj := range objects {
@@ -116,17 +126,27 @@ func VerifyAccess(ctx context.Context, store ObjectStore) error {
 		}
 	}
 	if !found {
-		return withCleanupError(fmt.Errorf("setup test list %q: object missing", key), cleanup, key)
+		return withCleanupError(fmt.Errorf("setup test list %s: object missing", label), cleanup, label)
 	}
 	if err := cleanup(); err != nil {
-		return fmt.Errorf("setup test cleanup %q: %w", key, err)
+		return fmt.Errorf("setup test cleanup %s: %w", label, err)
 	}
 	return nil
 }
 
-func withCleanupError(primary error, cleanup func() error, key string) error {
+// setupKeyLabel returns the quoted object key for error messages: the full
+// key as the store composes it when available, otherwise the relative key
+// with a note that the configured prefix is not shown.
+func setupKeyLabel(store ObjectStore, key string) string {
+	if keyer, ok := store.(ObjectKeyer); ok {
+		return fmt.Sprintf("%q", keyer.ObjectKey(key))
+	}
+	return fmt.Sprintf("%q (relative to the configured prefix)", key)
+}
+
+func withCleanupError(primary error, cleanup func() error, label string) error {
 	if cleanupErr := cleanup(); cleanupErr != nil {
-		return fmt.Errorf("%w; setup test cleanup %q also failed: %v", primary, key, cleanupErr)
+		return fmt.Errorf("%w; setup test cleanup %s also failed: %v", primary, label, cleanupErr)
 	}
 	return primary
 }
