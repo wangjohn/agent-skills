@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -114,6 +115,38 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 		out = append(out, SupplementalEvidence{Kind: evidence.Kind, ObservedAt: evidence.ObservedAt.UTC(), Provenance: evidence.Provenance, Payload: payload})
 	}
 	return out, gaps, nil
+}
+
+// AnnotateSupplementalGaps records what FilterSupplementalEvidence did to a
+// producer's evidence on that evidence itself. Producers filter before
+// persistence, so the later pass in NewSourceBundle sees already-clean input
+// and cannot report these gaps in Capture.Gaps. "redacted" and "truncated"
+// are set only by their own codes; "gaps" lists every distinct code once.
+func AnnotateSupplementalGaps(payload map[string]any, gaps []CaptureGap) {
+	if payload == nil || len(gaps) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	codes := make([]string, 0, len(gaps))
+	for _, gap := range gaps {
+		if gap.Code == "" || seen[gap.Code] {
+			continue
+		}
+		seen[gap.Code] = true
+		codes = append(codes, gap.Code)
+		switch gap.Code {
+		case "sensitive_content_redacted":
+			payload["redacted"] = true
+		case "content_truncated":
+			payload["truncated"] = true
+		}
+	}
+	sort.Strings(codes)
+	list := make([]any, 0, len(codes))
+	for _, code := range codes {
+		list = append(list, code)
+	}
+	payload["gaps"] = list
 }
 
 // MergeSupplementalEvidence combines observations without allowing the time

@@ -271,6 +271,36 @@ func TestHandleHookEventCapturesSupportedFinalTextAfterFiltering(t *testing.T) {
 	}
 }
 
+func TestHandleHookEventLabelsSubagentFinalGapWithoutClaimingRedaction(t *testing.T) {
+	home := t.TempDir()
+	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	if err := handleHookEvent(home, "codex", map[string]any{"hook_event_name": "SessionStart", "session_id": "native-1", "cwd": "/work/widget"}, start); err != nil {
+		t.Fatal(err)
+	}
+	stop := map[string]any{"hook_event_name": "Stop", "session_id": "native-1", "turn_id": "t1", "agent_id": "sub-1", "last_assistant_message": "plain final text"}
+	if err := handleHookEvent(home, "codex", stop, start.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	requests, err := store.LoadRequests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final archive.SupplementalEvidence
+	for _, item := range requests[0].HookEvidence {
+		if item.Kind == archive.EvidenceKindFinalResponse {
+			final = item
+		}
+	}
+	if final.Payload["text"] != "plain final text" || final.Payload["redacted"] != nil || final.Payload["truncated"] != nil {
+		t.Fatalf("unredacted final was mislabeled: %#v", final)
+	}
+	if gaps, _ := final.Payload["gaps"].([]any); len(gaps) != 1 || gaps[0] != "subagent_final_not_reconciled" {
+		t.Fatalf("producer gap was not carried on the evidence: %#v", final)
+	}
+}
+
 func TestHandleCursorHookCapturesVersionModeModelParamsAndResponse(t *testing.T) {
 	home := t.TempDir()
 	setUpTestConfig(t, home, "/work/widget", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))

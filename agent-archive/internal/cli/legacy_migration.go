@@ -78,6 +78,12 @@ func planLegacyMigration(userHome string, env Env) (*legacyJob, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Only an existing, recognized prototype job needs launchctl to answer:
+	// retiring it without knowing whether it is loaded could leave the
+	// prototype uploader running with its plist gone. With no legacy plist
+	// on disk (the common fresh install) this function returned nil above,
+	// so an unknown launchctl state never blocks setup, matching applySetup's
+	// tolerance for the main job on a fresh install.
 	state := env.jobState(path)
 	if state == "unknown" {
 		return nil, fmt.Errorf("cannot determine legacy upload job state; restore launchctl access and retry")

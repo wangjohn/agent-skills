@@ -165,6 +165,7 @@ var allowedKeys = map[string]bool{
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
 	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"truncated": true, "omitted_count": true, "snapshot_omitted_count": true, "inventory_complete": true, "root_status": true,
+	"gaps":      true,
 	"skill":     true,
 	"file_path": true,
 }
