@@ -60,8 +60,8 @@ func TestVersionSupportUsesPublishedVersionNotResumedRegistration(t *testing.T) 
 		t.Fatalf("%+v %v", result, err)
 	}
 	env := setupTestEnv(t, home, userHome, newFakeKeychain(), at)
-	if err := verifyPublications(home, cfg, env, localStore, remote, &result); err != nil || len(result.Errors) > 0 {
-		t.Fatalf("%+v %v", result, err)
+	if summary, err := verifyPublications(home, cfg, env, localStore, remote); err != nil || summary.Verified != 1 {
+		t.Fatalf("%+v %v", summary, err)
 	}
 	reg.Harness.Version = "2.0.0"
 	if err := localStore.SaveRegistration(reg); err != nil {

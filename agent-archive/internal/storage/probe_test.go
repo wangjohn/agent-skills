@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,4 +53,49 @@ func TestVerifyAccessConfiguredS3Namespace(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyAccessCleanupFailureReportsFullObjectKey(t *testing.T) {
+	backend := newFakeS3Server()
+	defer backend.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			http.Error(w, "<Error><Code>AccessDenied</Code></Error>", http.StatusForbidden)
+			return
+		}
+		backend.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	cfg := aws.Config{Region: "us-east-1", Credentials: awscredentials.NewStaticCredentialsProvider("test", "test", "")}
+	store, err := NewS3Store(S3StoreOptions{Client: NewClient(cfg, server.URL, true, 1), Bucket: "archive", Prefix: "nested/archive/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = VerifyAccess(context.Background(), store)
+	if err == nil {
+		t.Fatal("expected cleanup failure")
+	}
+	if !strings.Contains(err.Error(), `setup test cleanup "nested/archive/.setup-test/`) {
+		t.Fatalf("cleanup error should name the prefixed object key: %v", err)
+	}
+	if strings.Contains(err.Error(), "relative to the configured prefix") {
+		t.Fatalf("S3 store should report the full key without a note: %v", err)
+	}
+}
+
+func TestVerifyAccessWithoutObjectKeyerNotesRelativeKey(t *testing.T) {
+	store := failingDeleteStore{NewMemoryStore()}
+	err := VerifyAccess(context.Background(), store)
+	if err == nil {
+		t.Fatal("expected cleanup failure")
+	}
+	if !strings.Contains(err.Error(), `.setup-test/`) || !strings.Contains(err.Error(), "relative to the configured prefix") {
+		t.Fatalf("cleanup error should name the relative key and note the prefix: %v", err)
+	}
+}
+
+type failingDeleteStore struct{ *MemoryStore }
+
+func (failingDeleteStore) Delete(context.Context, string) error {
+	return errors.New("delete denied")
 }
