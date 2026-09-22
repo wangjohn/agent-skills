@@ -29,12 +29,12 @@ func (e *FilterError) Error() string { return "unsafe source format: " + e.Reaso
 
 var ErrUnsafeSourceFormat = &FilterError{Reason: "no recognized safe records"}
 
-const adapterVersion = "0.1.0"
+const adapterVersion = "0.2.0"
 
 // DefaultParserVersion is the source parser version reported by this bounded
 // foundation. The parser is intentionally partial until fixture coverage proves
 // a given native format more completely.
-const DefaultParserVersion = "0.4.0"
+const DefaultParserVersion = "0.5.0"
 
 // NewAdapter returns a privacy-first adapter by canonical harness name.
 func NewAdapter(name string) (Adapter, error) {
@@ -168,10 +168,22 @@ var allowedKeys = map[string]bool{
 	"version":     true,
 	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"truncated": true, "omitted_count": true, "snapshot_omitted_count": true, "inventory_complete": true, "root_status": true,
-	"gaps":      true,
-	"skill":     true,
-	"file_path": true,
+	"gaps":  true,
+	"skill": true,
+	// Claude Code marks a subagent's records with is_sidechain. Retaining the
+	// flag lets a parent's normalized view exclude any inlined child records
+	// from its own counts; the child is archived as its own session.
+	"is_sidechain": true, "issidechain": true,
+	"file_path":          true,
+	"archive_session_id": true, "relationship": true,
 }
+
+// captureGapKeys are additionally allowed inside a capture_gap evidence
+// payload, whose whole content is an archive-authored code and its fixed
+// description. They are deliberately not in allowedKeys: `detail` is a
+// common free-text field name in native transcripts, and sanitizeObject
+// recurses, so allowing it globally would retain arbitrary nested prose.
+var captureGapKeys = map[string]bool{"code": true, "detail": true}
 
 var blockedKeys = map[string]bool{
 	"api_key": true, "apikey": true, "access_key": true, "secret": true,
@@ -182,7 +194,7 @@ var blockedKeys = map[string]bool{
 }
 
 func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (FilteredTranscript, error) {
-	result := FilteredTranscript{Format: format}
+	result := FilteredTranscript{Format: format, NativeStartComplete: true}
 	scanner := bufio.NewScanner(r)
 	// Individual native JSONL records can contain tool output. A hard limit keeps
 	// filtering bounded; exceeding it is unsafe rather than silently truncated.
@@ -206,12 +218,26 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(line, &raw); err != nil {
+			result.NativeStartComplete = false
 			addGap("incomplete_or_invalid_record", lineNo, "jsonl record omitted")
 			continue
 		}
+		observed := parseNativeTimestamp(raw)
 		if result.FirstEventAt.IsZero() {
-			result.FirstEventAt = parseNativeTimestamp(raw)
+			result.FirstEventAt = observed
 		}
+		if observed.IsZero() {
+			if recordCarriesConversation(raw) {
+				result.NativeStartComplete = false
+			}
+		} else if result.NativeStartAt.IsZero() || observed.Before(result.NativeStartAt) {
+			result.NativeStartAt = observed
+		}
+		if !observed.IsZero() && (result.NativeEndAt.IsZero() || observed.After(result.NativeEndAt)) {
+			result.NativeEndAt = observed
+		}
+		result.SessionIDs = appendUniqueString(result.SessionIDs, firstString(raw, "session_id", "sessionId"))
+		result.AgentIDs = appendUniqueString(result.AgentIDs, firstString(raw, "agent_id", "agentId"))
 		kind, _ := raw["type"].(string)
 		cursorRoleContent := format == "cursor-jsonl" && kind == "" && firstString(raw, "role") != ""
 		if !knownTypes[kind] && !cursorRoleContent {
@@ -242,6 +268,43 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 	return result, nil
 }
 
+func appendUniqueString(values []string, candidate string) []string {
+	if candidate == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+// conversationRecordTypes are the record types whose start time is part of a
+// session's timestamp provenance. Harnesses also write bookkeeping entries
+// beside the conversation — Claude Code's `summary` and `file-history-snapshot`
+// records are the observed examples — which carry no top-level timestamp and
+// no conversational content. Treating those as missing provenance would make
+// an otherwise fully timestamped transcript permanently ineligible for child
+// capture, so only conversation-bearing records are required to be stamped.
+var conversationRecordTypes = map[string]bool{
+	"user": true, "assistant": true, "system": true, "message": true,
+	"tool_use": true, "tool_result": true, "tool_call": true,
+	"session_meta": true, "turn_context": true, "response_item": true,
+	"event_msg": true, "session": true, "event": true,
+}
+
+func recordCarriesConversation(record map[string]any) bool {
+	if _, present := record["message"]; present {
+		return true
+	}
+	if firstString(record, "role") != "" {
+		return true
+	}
+	kind, _ := record["type"].(string)
+	return conversationRecordTypes[strings.ToLower(strings.TrimSpace(kind))]
+}
+
 func parseNativeTimestamp(record map[string]any) time.Time {
 	for _, key := range []string{"timestamp", "created_at"} {
 		value, _ := record[key].(string)
@@ -255,6 +318,10 @@ func parseNativeTimestamp(record map[string]any) time.Time {
 type sanitizeState struct {
 	record int
 	addGap func(string, int, string)
+	// extraAllowed widens the key allowlist for one archive-authored payload
+	// shape. It applies at every depth of that payload, which is safe only
+	// because such payloads are flat maps this repository writes itself.
+	extraAllowed map[string]bool
 }
 
 func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bool) {
@@ -283,7 +350,7 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 			state.addGap("sensitive_or_hidden_field_omitted", state.record, "field omitted")
 			continue
 		}
-		if !allowedKeys[lower] {
+		if !allowedKeys[lower] && !state.extraAllowed[lower] {
 			state.addGap("unknown_field_omitted", state.record, "field omitted")
 			continue
 		}

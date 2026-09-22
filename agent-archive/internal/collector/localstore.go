@@ -41,7 +41,7 @@ func NewLocalStore(home string) (*LocalStore, error) {
 	if strings.TrimSpace(home) == "" {
 		return nil, errors.New("local store home is required")
 	}
-	for _, dir := range []string{"registrations", "requests", "request-locks", "published", "pending", "sessions", "pending-scans"} {
+	for _, dir := range []string{"registrations", "requests", "request-locks", "published", "pending", "sessions", "pending-scans", "subagent-candidates"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			return nil, fmt.Errorf("create local store directory %q: %w", dir, err)
 		}
@@ -159,7 +159,9 @@ func (s *LocalStore) SaveEvidence(archiveSessionID, reason string, observedAt ti
 // saveRequest always assigns a fresh token, even for deferred evidence: the
 // token is what CompleteRequest checks, so a hook that lands while a scan is
 // publishing the previous token keeps its evidence pending for the next
-// pass instead of being acknowledged away with it.
+// pass instead of being acknowledged away with it. Evidence identical to an
+// item the pending request already carries is dropped, and a call that adds
+// nothing at all leaves the request untouched.
 func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt time.Time, deferred bool, evidence ...archive.SupplementalEvidence) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
@@ -177,9 +179,11 @@ func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt ti
 		return err
 	}
 	merged := Request{ArchiveSessionID: archiveSessionID, RequestedAt: requestedAt, Deferred: deferred}
+	urgencyChanged := false
 	if found {
 		merged = existing
 		if !deferred {
+			urgencyChanged = merged.Deferred
 			merged.Deferred = false
 			if requestedAt.After(merged.RequestedAt) {
 				merged.RequestedAt = requestedAt
@@ -190,6 +194,7 @@ func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt ti
 	if err != nil {
 		return fmt.Errorf("generate request token: %w", err)
 	}
+	reasonAlready := true
 	if reason != "" {
 		have := false
 		for _, r := range merged.Reasons {
@@ -199,11 +204,36 @@ func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt ti
 			}
 		}
 		if !have {
+			reasonAlready = false
 			merged.Reasons = append(merged.Reasons, reason)
 		}
 	}
-	merged.HookEvidence = append(merged.HookEvidence, evidence...)
+	added := 0
+	for _, item := range evidence {
+		if requestHasEvidence(merged.HookEvidence, item) {
+			continue
+		}
+		merged.HookEvidence = append(merged.HookEvidence, item)
+		added++
+	}
+	// A repeated notification that changes nothing about the pending request
+	// is not written back at all. A retry loop — the collector re-announcing a
+	// published child to a parent whose own request never clears — would
+	// otherwise append an identical evidence item on every pass and grow the
+	// request file without bound.
+	if found && existing.Token != "" && added == 0 && reasonAlready && !urgencyChanged && !requestedAt.After(existing.RequestedAt) {
+		return nil
+	}
 	return local.Write(s.requestPath(archiveSessionID), merged)
+}
+
+func requestHasEvidence(have []archive.SupplementalEvidence, candidate archive.SupplementalEvidence) bool {
+	for _, item := range have {
+		if archive.SupplementalEvidenceEqual(item, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *LocalStore) requestPath(archiveSessionID string) string {

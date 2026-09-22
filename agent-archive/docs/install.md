@@ -347,3 +347,34 @@ list of known-old version strings: a sidecar counts only when its parser version
 reads as a plain `major.minor.patch` number at or above `0.4.0`, so an empty or
 custom version string is excluded too. Normal collection regenerates metadata after a parser upgrade when retained source is available; missing historical observation
 coverage remains unknown. Multiple used hashes of the same skill are retained.
+
+### Linked subagent sessions
+
+Supported Claude `SubagentStop` events stage a child for background validation.
+The child must belong to an already accepted parent and expose matching parent
+and agent IDs plus a native start after that parent's start and project
+activation. Missing files can be retried; ambiguous identity or old starts stay
+unavailable. A child arriving before its parent is accepted is ignored; a later
+stop can retry. `SubagentStart` alone does not prove freshness.
+
+Each accepted child gets its own source and metadata, with `parent_session_id`.
+The parent gets `linked_sessions`; it does not embed the child's transcript or
+add child messages to its own counts. The local/native child identity is scoped
+by parent ID and agent ID. Resumed children retain the original start. Every
+later capture rechecks the mutable native file's identity and start.
+
+`agent-archive show PARENT` adds `linked_session_availability` from direct child
+metadata reads. That field is added by the command, beside the sidecar's own
+fields, so `show` output is a rendering of a metadata object rather than an
+instance of `metadata.schema.json` (which sets `additionalProperties: false`);
+validate stored metadata objects, not command output. `metadata_available` does
+not verify source bytes. Select the
+child explicitly with `agent-archive show CHILD --normalized` for verified
+conversation content. Missing links report pending, unavailable, or
+unavailable-or-expired; one missing child does not block the parent. Links do not
+extend retention. Children are never downloaded recursively.
+
+This adds optional fields to schema version 1, filter version 2, adapter 0.2.0,
+and parser 0.5.0. Existing bundles remain readable. Claude is fixture-tested;
+real app capture is pending. Codex/Cursor child capture and native skill
+eligibility remain unavailable rather than inferred from incomplete evidence.

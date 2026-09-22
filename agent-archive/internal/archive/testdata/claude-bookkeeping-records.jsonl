@@ -1,0 +1,4 @@
+{"type":"summary","summary":"Synthetic session recap","leafUuid":"claude-a"}
+{"version":"1.0.83","type":"user","uuid":"claude-a","sessionId":"native-parent","agentId":"agent-1","isSidechain":true,"timestamp":"2026-09-17T18:00:00Z","message":{"role":"user","content":"please check it"}}
+{"type":"file-history-snapshot","messageId":"claude-a","snapshot":{"trackedFileBackups":{}}}
+{"version":"1.0.83","type":"assistant","uuid":"claude-b","sessionId":"native-parent","agentId":"agent-1","isSidechain":true,"timestamp":"2026-09-17T18:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"I will check it."},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}

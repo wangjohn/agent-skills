@@ -97,6 +97,7 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		return Result{}, errors.New("machine ID is required")
 	}
 	now := opts.now()
+	materializationIssues := materializeSubagentCandidates(local, opts)
 
 	registrations, err := local.LoadRegistrations()
 	if err != nil {
@@ -123,7 +124,7 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		}
 	}
 
-	result := Result{Errors: map[string]error{}}
+	result := Result{Errors: materializationIssues}
 	pending := 0
 	for _, reg := range registrations {
 		if opts.AcceptSession != nil && !opts.AcceptSession(reg) {
@@ -134,6 +135,10 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 
 		if err := local.SetScanPending(reg.ArchiveSessionID, true); err != nil {
 			return result, fmt.Errorf("journal pending scan: %w", err)
+		}
+		if err := markPublishedSubagent(local, reg); err != nil {
+			result.Errors[reg.ArchiveSessionID] = err
+			pending++
 		}
 		outcome, err := processSession(ctx, local, store, reg, req, now, opts)
 		if err != nil {
@@ -159,6 +164,10 @@ func Run(ctx context.Context, local *LocalStore, store storage.ObjectStore, opts
 		switch outcome {
 		case outcomePublished:
 			result.Published = append(result.Published, reg.ArchiveSessionID)
+			if err := markPublishedSubagent(local, reg); err != nil {
+				result.Errors[reg.ArchiveSessionID] = err
+				pending++
+			}
 		case outcomeRateLimited:
 			result.Skipped = append(result.Skipped, reg.ArchiveSessionID)
 		case outcomeSkipped:
@@ -236,6 +245,9 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		// remains untouched and readable.
 		return outcomeSkipped, fmt.Errorf("filter transcript: %w", err)
 	}
+	if err := validateSubagentTranscript(reg, filtered); err != nil {
+		return outcomeSkipped, err
+	}
 
 	prevBundle, _, prevStatus, havePrev, err := local.LoadPublished(reg.ArchiveSessionID)
 	if err != nil {
@@ -287,8 +299,19 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	case !havePrev, changedFromCache:
 		// Evidence not seen before, whether relative to the last publish or
 		// to a still-pending rate-limited candidate: this is a new snapshot,
-		// first observed now.
+		// first observed now. A change that only adds or updates a child link
+		// is the exception: it carries no new activity of this session's own,
+		// so it keeps the capture time its evidence was actually observed at.
 		candidate.Capture.CapturedAt = now
+		if havePrev && !prevBundle.Capture.CapturedAt.IsZero() {
+			linkOnly, err := bundleChangeIsLinkOnly(prevBundle, candidate)
+			if err != nil {
+				return outcomeSkipped, fmt.Errorf("compare linked sessions: %w", err)
+			}
+			if linkOnly {
+				candidate.Capture.CapturedAt = prevBundle.Capture.CapturedAt
+			}
+		}
 	case prevStatus == CacheStatusRateLimited:
 		// Unchanged since the last withheld candidate: it is the same
 		// pending snapshot, so reuse its already-assigned capture time
@@ -563,6 +586,32 @@ func bundleEvidenceEqual(a, b archive.SourceBundle) (bool, error) {
 		return false, err
 	}
 	return bytes.Equal(aBytes, bBytes), nil
+}
+
+// bundleChangeIsLinkOnly reports whether the only difference between the last
+// snapshot and the candidate is which child sessions the parent links to. A
+// link is a note about another session, not new activity in this one, so it
+// must not restart the parent's retention clock (retention.go measures from
+// Capture.CapturedAt).
+func bundleChangeIsLinkOnly(a, b archive.SourceBundle) (bool, error) {
+	a.LinkedSessions, b.LinkedSessions = nil, nil
+	a.SupplementalEvidence = withoutLinkedSessionEvidence(a.SupplementalEvidence)
+	b.SupplementalEvidence = withoutLinkedSessionEvidence(b.SupplementalEvidence)
+	return bundleEvidenceEqual(a, b)
+}
+
+func withoutLinkedSessionEvidence(in []archive.SupplementalEvidence) []archive.SupplementalEvidence {
+	out := make([]archive.SupplementalEvidence, 0, len(in))
+	for _, item := range in {
+		if item.Kind == archive.EvidenceKindLinkedSession {
+			continue
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // nativeEvidenceExtends reports whether candidate carries everything previous

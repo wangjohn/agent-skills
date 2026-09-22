@@ -104,6 +104,9 @@ func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) err
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
+	if err := s.removeSubagentCandidatesForSession(archiveSessionID); err != nil {
+		return fmt.Errorf("remove linked subagent candidates: %w", err)
+	}
 	paths := []string{
 		s.registrationPath(archiveSessionID),
 		s.requestPath(archiveSessionID),

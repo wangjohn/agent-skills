@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -13,9 +14,16 @@ func TestCapabilityProfilesDoNotClaimUnverifiedNativeEvidence(t *testing.T) {
 		if profile.Transcript.State != "documented" {
 			t.Fatalf("%s profile=%#v", name, profile)
 		}
-		if profile.SkillEvidence.State != "unavailable" || profile.SubagentLinkage.State != "unavailable" {
+		expectedSubagent := "unavailable"
+		if name == "claude" {
+			expectedSubagent = "fixture_validated"
+		}
+		if profile.SkillEvidence.State != "unavailable" || profile.SubagentLinkage.State != expectedSubagent {
 			t.Fatalf("%s invented native capability: %#v", name, profile)
 		}
+	}
+	if !strings.Contains(captureCapabilityProfile("claude").SubagentLinkage.Evidence, "unverified") {
+		t.Fatal("fixture coverage claimed live verification")
 	}
 	if got := captureCapabilityProfile("cursor").FreshStart.State; got != "unavailable" {
 		t.Fatalf("Cursor start=%s", got)

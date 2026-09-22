@@ -101,6 +101,7 @@ func captureCapabilityProfile(name string) captureCapabilities {
 		profile.Transcript = documented("Hooks provide transcript_path; official documentation says its format is not stable.")
 		profile.Lifecycle = documented("SessionStart, Stop, Interrupt, SessionEnd, SubagentStart, and SubagentStop are documented.")
 	case "claude":
+		profile.SubagentLinkage = capabilityEvidence{State: "fixture_validated", Evidence: "Documented SubagentStop identity/path plus synthetic JSONL ownership and native timestamp fixtures. Actual installed-version capture is unverified.", NextAction: "Run a synthetic parent/child capture and read-back for the installed version."}
 		profile.FreshStart = documented("SessionStart.source distinguishes startup/clear from resume/compact.")
 		profile.Transcript = documented("Hooks provide transcript_path to the native JSONL transcript.")
 		profile.Lifecycle = documented("SessionStart, Stop, SessionEnd, and SubagentStop are documented.")

@@ -27,12 +27,15 @@
     },
     "native_records": {"type": "array", "items": {"type": "object"}},
     "native_text": {"type": "array", "items": {"type":"object", "additionalProperties":false, "required":["format","content"], "properties":{"format":{"type":"string"},"content":{"type":"string"}}}},
-    "supplemental_evidence": {"type": "array", "items": {"$ref": "#/$defs/supplemental"}}
+    "supplemental_evidence": {"type": "array", "items": {"$ref": "#/$defs/supplemental"}},
+    "parent_session_id": {"type": "string", "minLength": 1},
+    "linked_sessions": {"type": "array", "items": {"$ref": "#/$defs/linked_session"}}
   },
   "$defs": {
     "harness": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "mode": {"type": "string"}}},
     "boundary": {"type": "object", "additionalProperties": false, "required": ["retained_records", "retained_bytes"], "properties": {"retained_records": {"type": "integer", "minimum": 0}, "retained_bytes": {"type": "integer", "minimum": 0}}},
     "gap": {"type": "object", "additionalProperties": false, "required": ["code"], "properties": {"code": {"type": "string"}, "record": {"type": "integer", "minimum": 1}, "detail": {"type": "string"}}},
-    "supplemental": {"type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "provenance", "payload"], "properties": {"kind": {"type": "string"}, "observed_at": {"type": "string", "format": "date-time"}, "provenance": {"type": "string"}, "payload": {"type": "object"}}}
+    "supplemental": {"type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "provenance", "payload"], "properties": {"kind": {"type": "string"}, "observed_at": {"type": "string", "format": "date-time"}, "provenance": {"type": "string"}, "payload": {"type": "object"}}},
+    "linked_session": {"type": "object", "additionalProperties": false, "required": ["session_id", "relationship", "status", "observed_at"], "properties": {"session_id": {"type": "string", "minLength": 1}, "relationship": {"const": "subagent"}, "status": {"enum": ["pending", "published", "unavailable"]}, "observed_at": {"type": "string", "format": "date-time"}}}
   }
 }

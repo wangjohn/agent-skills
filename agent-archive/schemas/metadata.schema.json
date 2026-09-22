@@ -27,11 +27,14 @@
     "skill_detection": {"enum": ["observed_none", "partial", "unavailable", "observed"]},
     "counts": {"type": "object", "properties":{"turns":{"type":"integer"},"messages":{"type":"integer"},"tool_calls":{"type":"integer"},"explicit_feedback":{"type":"integer"}}},
     "capture_gaps": {"type": "array", "items": {"type": "object"}},
-    "source_bundle": {"type": "object", "additionalProperties": false, "required": ["key", "sha256", "compressed_bytes"], "properties": {"key": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "compressed_bytes": {"type": "integer", "minimum": 0}}}
+    "source_bundle": {"type": "object", "additionalProperties": false, "required": ["key", "sha256", "compressed_bytes"], "properties": {"key": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "compressed_bytes": {"type": "integer", "minimum": 0}}},
+    "parent_session_id": {"type": "string", "minLength": 1},
+    "linked_sessions": {"type": "array", "items": {"$ref": "#/$defs/linked_session"}}
   },
   "$defs": {
     "harness": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "mode": {"type": "string"}}},
     "versioned": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}}},
-    "skill": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "sha256": {"type": "string"}, "coverage":{"type":"string"}}}
+    "skill": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string"}, "sha256": {"type": "string"}, "coverage":{"type":"string"}}},
+    "linked_session": {"type": "object", "additionalProperties": false, "required": ["session_id", "relationship", "status", "observed_at"], "properties": {"session_id": {"type": "string", "minLength": 1}, "relationship": {"const": "subagent"}, "status": {"enum": ["pending", "published", "unavailable"]}, "observed_at": {"type": "string", "format": "date-time"}}}
   }
 }
