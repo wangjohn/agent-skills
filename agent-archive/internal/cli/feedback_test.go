@@ -40,6 +40,9 @@ func TestFeedbackFileIsFilteredBeforeRequestPersistence(t *testing.T) {
 	if evidence.Provenance != "user:agent-archive-feedback-file" || evidence.Payload["redacted"] != true || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("evidence=%#v", evidence)
 	}
+	if gaps, _ := evidence.Payload["gaps"].([]any); len(gaps) != 1 || gaps[0] != "sensitive_content_redacted" || evidence.Payload["truncated"] != nil {
+		t.Fatalf("gap labels=%#v", evidence.Payload)
+	}
 	encoded, err := json.Marshal(requests)
 	if err != nil {
 		t.Fatal(err)

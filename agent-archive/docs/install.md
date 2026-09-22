@@ -121,7 +121,12 @@ Macs are supported.
    configuration identity; it describes the checked publication, not continuous
    remote monitoring. The background collector checks storage access with one
    synthetic round trip for a new configuration, retries failed checks, and
-   refreshes the check after five minutes.
+   refreshes the check after four minutes; status calls a verified check stale
+   after ten minutes unless collection is paused, when the last check is shown
+   with its time. A publication that cannot be read back is retried with
+   increasing delays (one minute up to a day), at most five per pass, oldest
+   first; it is reported by status as pending, failed, or mismatched, and does
+   not fail `sync`.
    Authentication evidence identifies whether it came from manual sync or the
    background environment. Unexposed app versions and trust remain unknown.
 
@@ -210,9 +215,11 @@ made it eligible, or used that exact version during an earlier turn.
 Changed inventories and instruction versions remain in session history. Empty
 and removed directories produce explicit observations. Unchanged observations
 are not appended again. Skill edits alone do not refresh inactive sessions.
-Each observation pass reads at most 4 MiB of instruction content; oversized,
-truncated, nested, and uninspected plugin content is marked as a coverage gap.
-Hooks do not perform this filesystem scan.
+Within one collector pass, user-scope skill directories are read once per app
+and each project's skill directory once, with at most 4 MiB of instruction
+content per such read. Oversized, truncated, nested, unreadable, and
+uninspected plugin content is marked as a coverage gap rather than failing the
+session. Hooks do not perform this filesystem scan.
 
 ## Build from source
 

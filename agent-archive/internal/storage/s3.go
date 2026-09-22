@@ -89,6 +89,17 @@ func (s *S3Store) key(relative string) (string, error) {
 	return Prefix(s.prefix, relative)
 }
 
+// ObjectKey returns the full bucket key for relative, including the
+// configured prefix. Keys that Prefix rejects are returned unchanged so error
+// messages still identify the object.
+func (s *S3Store) ObjectKey(relative string) string {
+	key, err := s.key(relative)
+	if err != nil {
+		return relative
+	}
+	return key
+}
+
 func (s *S3Store) Put(ctx context.Context, relative string, data []byte) error {
 	key, err := s.key(relative)
 	if err != nil {
