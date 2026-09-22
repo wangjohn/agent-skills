@@ -207,7 +207,7 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 				_ = save()
 				return fmt.Errorf("connect storage: %w", e)
 			}
-			e = storage.VerifyAccess(ctx, store, draft.Config.Storage.Prefix)
+			e = storage.VerifyAccess(ctx, store)
 			cancel()
 			if e != nil {
 				failure := fmt.Errorf("storage test failed: %w (check access and retry; saved choices are kept)", e)
