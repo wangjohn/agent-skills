@@ -291,7 +291,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		parser.Name = bundle.Capture.AdapterName
 	}
 	if parser.Version == "" {
-		parser.Version = bundle.Capture.AdapterVersion
+		parser.Version = DefaultParserVersion
 	}
 	if parser.Status == "" {
 		parser.Status = ParserStatusPartial

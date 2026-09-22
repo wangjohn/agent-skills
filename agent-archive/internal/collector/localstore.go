@@ -310,9 +310,10 @@ const (
 // meaningful change" without redownloading or reparsing published history),
 // when that happened, and why the bundle is in the state it's in.
 type publishedState struct {
-	Bundle      archive.SourceBundle `json:"bundle"`
-	PublishedAt time.Time            `json:"published_at"`
-	Status      CacheStatus          `json:"status"`
+	MetadataBytes []byte               `json:"metadata_bytes,omitempty"`
+	Bundle        archive.SourceBundle `json:"bundle"`
+	PublishedAt   time.Time            `json:"published_at"`
+	Status        CacheStatus          `json:"status"`
 	// BlockedReason is set only while Status is CacheStatusBlocked.
 	BlockedReason BlockedReason `json:"blocked_reason,omitempty"`
 	// LastPublished survives a newer rate-limited or declined candidate so
@@ -332,8 +333,8 @@ func (s *LocalStore) publishedPath(archiveSessionID string) string {
 // SavePublished records the outcome of a build/publish decision for a
 // session, so the next scan can compare against it instead of rebuilding
 // from scratch. See CacheStatus for what each status means for retry.
-func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus) error {
-	return s.savePublishedState(archiveSessionID, bundle, publishedAt, status, "")
+func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, metadata ...[]byte) error {
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, status, "", metadata)
 }
 
 // SaveBlocked records a terminal capture gap for a session (see
@@ -344,10 +345,10 @@ func (s *LocalStore) SaveBlocked(archiveSessionID string, bundle archive.SourceB
 	if reason == "" {
 		return errors.New("blocked reason is required")
 	}
-	return s.savePublishedState(archiveSessionID, bundle, publishedAt, CacheStatusBlocked, reason)
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, CacheStatusBlocked, reason, nil)
 }
 
-func (s *LocalStore) savePublishedState(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, reason BlockedReason) error {
+func (s *LocalStore) savePublishedState(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, reason BlockedReason, metadata [][]byte) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -365,7 +366,7 @@ func (s *LocalStore) savePublishedState(archiveSessionID string, bundle archive.
 	if status == CacheStatusPublished {
 		last = &publishedSnapshot{Bundle: bundle, PublishedAt: publishedAt}
 	}
-	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, BlockedReason: reason, LastPublished: last})
+	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, BlockedReason: reason, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
 }
 
 // LoadBlocked reports whether a session is in CacheStatusBlocked and why.
@@ -423,6 +424,7 @@ func (s *LocalStore) LoadLastPublished(archiveSessionID string) (bundle archive.
 // every retry uses the same hash and timestamps even after process restart.
 // Bundle remains available for change detection and future parser-only rebuilds.
 type PendingPublication struct {
+	MetadataOnly  bool                 `json:"metadata_only,omitempty"`
 	Bundle        archive.SourceBundle `json:"bundle"`
 	SourceKey     string               `json:"source_key"`
 	MetadataKey   string               `json:"metadata_key"`
@@ -525,4 +527,11 @@ func (s *LocalStore) ScanPending(id string) (bool, error) {
 		return false, nil
 	}
 	return pending, err
+}
+
+func publicationMetadata(previous []byte, supplied [][]byte) []byte {
+	if len(supplied) > 0 {
+		return supplied[0]
+	}
+	return previous
 }
