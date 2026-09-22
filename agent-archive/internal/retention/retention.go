@@ -1,9 +1,18 @@
 // Package retention deletes local-machine-owned archive data that has aged
 // out: source snapshots superseded more than a grace period ago, and,
 // separately, entire sessions once their most recently captured evidence is
-// older than a configured retention window. It never deletes a currently
-// referenced object, and it never considers another machine's sessions —
-// registrations only ever exist on the machine that created them.
+// older than a configured retention window.
+//
+// Before deleting anything it fetches the session's remote metadata.json
+// and treats that, not the local cache, as the current pointer: the current
+// source is never deleted regardless of age, and neither is its immediate
+// predecessor (the most recently superseded snapshot), so a reader that
+// just fetched metadata always has a snapshot to fall back to. Whole-session
+// expiry deletes metadata before sources, so an interruption leaves at
+// worst unreferenced objects, never a live pointer to missing data; a
+// failed expiry keeps the local registration (ownership) so the next sweep
+// retries it. It never considers another machine's sessions — registrations
+// only ever exist on the machine that created them.
 package retention
 
 import (
@@ -25,8 +34,10 @@ type Options struct {
 	// Now returns the current time. Defaults to time.Now.
 	Now func() time.Time
 	// GracePeriod bounds how long a superseded (no longer current) source
-	// snapshot stays downloadable before deletion. Defaults to 24h,
-	// matching the spec's proposed grace period.
+	// snapshot stays downloadable before deletion. It applies only to
+	// snapshots older than the immediate predecessor of the current source,
+	// which is retained regardless of age. Defaults to 24h, matching the
+	// spec's proposed grace period.
 	GracePeriod time.Duration
 	// SessionMaxAge is whole-session retention: once a session's most
 	// recently captured evidence is older than this, its metadata and every
@@ -90,7 +101,10 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 		return fmt.Errorf("load superseded sources: %w", err)
 	}
 	locallyExpired := opts.SessionMaxAge > 0 && found && !bundle.Capture.CapturedAt.IsZero() && now.Sub(bundle.Capture.CapturedAt) >= opts.SessionMaxAge
-	if !locallyExpired && len(superseded) == 0 {
+	// Skip the remote round trip when this pass could not delete anything:
+	// the predecessor stays in the ledger forever, so without this every
+	// session ever republished would cost one GET per sync indefinitely.
+	if !locallyExpired && !anySupersededExpirable(superseded, now, opts.gracePeriod()) {
 		return nil
 	}
 
@@ -169,6 +183,24 @@ func sweepSession(ctx context.Context, local *collector.LocalStore, store storag
 		result.DeletedSnapshots++
 	}
 	return nil
+}
+
+// anySupersededExpirable reports whether a sweep could delete at least one
+// ledger entry now. The last entry is either the current source or its
+// immediate predecessor, and neither is ever deleted, so only an earlier
+// entry past its grace period can be. This is a conservative necessary
+// condition: it may say yes for an entry the full check then retains, but
+// never no when a deletion is possible, so skipping on false is safe.
+func anySupersededExpirable(superseded []collector.SupersededSource, now time.Time, grace time.Duration) bool {
+	for i, s := range superseded {
+		if i == len(superseded)-1 {
+			return false
+		}
+		if now.Sub(s.SupersededAt) >= grace {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove discovery first. If source deletion is interrupted, unreferenced
