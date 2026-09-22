@@ -66,6 +66,7 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(out, "Checking installed applications...")
 	discoveries := env.discoverApplications(userHome)
 	discoveredAt := env.now()
 	p := newPrompter(stdin, out)
@@ -279,6 +280,11 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 		}
 		if err = os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		// The configuration is committed; a diagnostic for a project that
+		// was just excluded is stale local state, not a reason to fail.
+		if e := pruneCaptureDiagnostics(home, draft.Config.Archive.Projects); e != nil {
+			fmt.Fprintf(errOut, "Could not prune capture diagnostics for excluded projects: %v\n", e)
 		}
 		fmt.Fprintln(out, "\nConfiguration saved.")
 		if existing.Paused {

@@ -123,13 +123,44 @@ type Request struct {
 	Reasons          []string                       `json:"reasons"`
 	RequestedAt      time.Time                      `json:"requested_at"`
 	HookEvidence     []archive.SupplementalEvidence `json:"hook_evidence,omitempty"`
+	// Deferred marks a request that only carries lifecycle activity evidence
+	// (a session start, a prompt submitted) and has not asked for a debounce
+	// flush: the collector folds it in on its normal MinUploadInterval
+	// schedule instead of uploading on every prompt. A stop, end, or response
+	// request for the same session clears it. Requests written before the
+	// field existed are urgent, as they always were.
+	Deferred bool `json:"deferred,omitempty"`
+}
+
+// urgent reports whether the request asks the collector to flush the upload
+// debounce now rather than wait for the next scheduled publication.
+func (r Request) urgent() bool {
+	return r.Token != "" && !r.Deferred
 }
 
 // SaveRequest merges a new hook event into any already-pending request for
 // the same session: reasons accumulate, evidence appends, and RequestedAt
 // advances to the latest event. This is the coalescing the spec asks for
-// when a stop and a session-end hook both fire for the same session.
+// when a stop and a session-end hook both fire for the same session. The
+// resulting request is urgent: the collector publishes it as soon as it is
+// scanned, bypassing MinUploadInterval.
 func (s *LocalStore) SaveRequest(archiveSessionID, reason string, requestedAt time.Time, evidence ...archive.SupplementalEvidence) error {
+	return s.saveRequest(archiveSessionID, reason, requestedAt, false, evidence...)
+}
+
+// SaveEvidence appends lifecycle evidence to the session's request without
+// asking for a flush. A request it creates is deferred; a request that is
+// already pending keeps its urgency and RequestedAt, so a stop that is
+// waiting to publish is neither delayed nor re-triggered by a later prompt.
+func (s *LocalStore) SaveEvidence(archiveSessionID, reason string, observedAt time.Time, evidence ...archive.SupplementalEvidence) error {
+	return s.saveRequest(archiveSessionID, reason, observedAt, true, evidence...)
+}
+
+// saveRequest always assigns a fresh token, even for deferred evidence: the
+// token is what CompleteRequest checks, so a hook that lands while a scan is
+// publishing the previous token keeps its evidence pending for the next
+// pass instead of being acknowledged away with it.
+func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt time.Time, deferred bool, evidence ...archive.SupplementalEvidence) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -145,11 +176,14 @@ func (s *LocalStore) SaveRequest(archiveSessionID, reason string, requestedAt ti
 	if err != nil {
 		return err
 	}
-	merged := Request{ArchiveSessionID: archiveSessionID, RequestedAt: requestedAt}
+	merged := Request{ArchiveSessionID: archiveSessionID, RequestedAt: requestedAt, Deferred: deferred}
 	if found {
 		merged = existing
-		if requestedAt.After(merged.RequestedAt) {
-			merged.RequestedAt = requestedAt
+		if !deferred {
+			merged.Deferred = false
+			if requestedAt.After(merged.RequestedAt) {
+				merged.RequestedAt = requestedAt
+			}
 		}
 	}
 	merged.Token, err = local.ID()
@@ -190,25 +224,26 @@ func (s *LocalStore) loadRequest(archiveSessionID string) (Request, bool, error)
 
 // ensureRequestToken upgrades a request written by an older collector. The
 // token is assigned under the same lock used by hooks and acknowledgements so
-// migration cannot overwrite a concurrent hook update.
-func (s *LocalStore) ensureRequestToken(archiveSessionID string) (Request, error) {
+// migration cannot overwrite a concurrent hook update. found is false when
+// the request disappeared between listing and upgrade.
+func (s *LocalStore) ensureRequestToken(archiveSessionID string) (Request, bool, error) {
 	unlock, err := local.NamedLockWait(s.home, filepath.Join("request-locks", archiveSessionID+".lock"), time.Second)
 	if err != nil {
-		return Request{}, fmt.Errorf("lock request %q: %w", archiveSessionID, err)
+		return Request{}, false, fmt.Errorf("lock request %q: %w", archiveSessionID, err)
 	}
 	defer unlock()
 	request, found, err := s.loadRequest(archiveSessionID)
 	if err != nil || !found || request.Token != "" {
-		return request, err
+		return request, found, err
 	}
 	request.Token, err = local.ID()
 	if err != nil {
-		return Request{}, fmt.Errorf("generate request token: %w", err)
+		return Request{}, false, fmt.Errorf("generate request token: %w", err)
 	}
 	if err := local.Write(s.requestPath(archiveSessionID), request); err != nil {
-		return Request{}, fmt.Errorf("upgrade request %q: %w", archiveSessionID, err)
+		return Request{}, false, fmt.Errorf("upgrade request %q: %w", archiveSessionID, err)
 	}
-	return request, nil
+	return request, true, nil
 }
 
 // LoadRequests returns every pending request, sorted by archive session ID.
@@ -283,6 +318,25 @@ const (
 	// CacheStatusRateLimited, it must never auto-publish just because time
 	// passed — only a genuine further content change reconsiders it.
 	CacheStatusDeclined CacheStatus = "declined"
+	// CacheStatusBlocked means the session's current transcript can no longer
+	// be captured safely (see BlockedReason) and, unlike a transient failure,
+	// the condition cannot clear by retrying: it is a recorded capture gap,
+	// not an error. The last published snapshot stays retained and any
+	// outstanding request is acknowledged, so later passes are no-ops until
+	// the transcript changes again.
+	CacheStatusBlocked CacheStatus = "blocked"
+)
+
+// BlockedReason says why a session sits in CacheStatusBlocked.
+type BlockedReason string
+
+const (
+	// BlockedReasonTranscriptRewritten means the transcript was truncated,
+	// compacted, or rewritten so it no longer extends the retained evidence.
+	BlockedReasonTranscriptRewritten BlockedReason = "transcript_rewritten"
+	// BlockedReasonTranscriptTooLarge means the transcript exceeds the
+	// collection size limit (Options.MaxTranscriptBytes).
+	BlockedReasonTranscriptTooLarge BlockedReason = "transcript_too_large"
 )
 
 // publishedState is the small local cache of what was last built for a
@@ -294,6 +348,8 @@ type publishedState struct {
 	Bundle        archive.SourceBundle `json:"bundle"`
 	PublishedAt   time.Time            `json:"published_at"`
 	Status        CacheStatus          `json:"status"`
+	// BlockedReason is set only while Status is CacheStatusBlocked.
+	BlockedReason BlockedReason `json:"blocked_reason,omitempty"`
 	// LastPublished survives a newer rate-limited or declined candidate so
 	// compaction checks and retention always have the actual remote baseline.
 	LastPublished *publishedSnapshot `json:"last_published,omitempty"`
@@ -312,6 +368,21 @@ func (s *LocalStore) publishedPath(archiveSessionID string) string {
 // session, so the next scan can compare against it instead of rebuilding
 // from scratch. See CacheStatus for what each status means for retry.
 func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, metadata ...[]byte) error {
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, status, "", metadata)
+}
+
+// SaveBlocked records a terminal capture gap for a session (see
+// CacheStatusBlocked). bundle is what the next scan compares against and
+// publishedAt is the last actual publish time, if any; the last published
+// snapshot itself is preserved exactly as SavePublished preserves it.
+func (s *LocalStore) SaveBlocked(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, reason BlockedReason) error {
+	if reason == "" {
+		return errors.New("blocked reason is required")
+	}
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, CacheStatusBlocked, reason, nil)
+}
+
+func (s *LocalStore) savePublishedState(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, reason BlockedReason, metadata [][]byte) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -329,7 +400,23 @@ func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.Sourc
 	if status == CacheStatusPublished {
 		last = &publishedSnapshot{Bundle: bundle, PublishedAt: publishedAt}
 	}
-	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
+	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, BlockedReason: reason, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
+}
+
+// LoadBlocked reports whether a session is in CacheStatusBlocked and why.
+func (s *LocalStore) LoadBlocked(archiveSessionID string) (BlockedReason, bool, error) {
+	var state publishedState
+	readErr := local.Read(s.publishedPath(archiveSessionID), &state)
+	if errors.Is(readErr, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if readErr != nil {
+		return "", false, fmt.Errorf("read published state %q: %w", archiveSessionID, readErr)
+	}
+	if state.Status != CacheStatusBlocked {
+		return "", false, nil
+	}
+	return state.BlockedReason, true, nil
 }
 
 // LoadPublished returns the last cached bundle for a session, if any.

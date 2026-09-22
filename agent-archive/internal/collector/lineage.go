@@ -82,11 +82,19 @@ func (s *LocalStore) RemoveSuperseded(archiveSessionID, key string) error {
 	return local.Write(s.supersededPath(archiveSessionID), out)
 }
 
+// SessionDir is the per-session directory under the collector-owned
+// sessions/ tree where other packages keep session-scoped evidence (the CLI's
+// read-back verification record, for one). ForgetSession clears it.
+func (s *LocalStore) SessionDir(archiveSessionID string) string {
+	return filepath.Join(s.home, "sessions", archiveSessionID)
+}
+
 // ForgetSession removes every local record of a session: its registration,
-// published-bundle cache, superseded-source ledger, and native-session
-// index entry. A caller uses this only after successfully deleting that
-// session's metadata and every source object from storage (whole-session
-// retention); it never touches storage itself.
+// request, request lock, published-bundle cache, pending publication and
+// scan markers, superseded-source ledger, per-session evidence directory,
+// and native-session index entry. A caller uses this only after successfully
+// deleting that session's metadata and every source object from storage
+// (whole-session retention); it never touches storage itself.
 func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
@@ -97,7 +105,9 @@ func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) err
 		s.publishedPath(archiveSessionID),
 		s.pendingPath(archiveSessionID),
 		filepath.Join(s.home, "pending-scans", archiveSessionID+".json"),
+		filepath.Join(s.home, "request-locks", archiveSessionID+".lock"),
 		s.supersededPath(archiveSessionID),
+		filepath.Join(s.SessionDir(archiveSessionID), "verification.json"),
 	}
 	if nativeSessionID != "" {
 		paths = append(paths, nativeSessionIndexPath(s.home, nativeSessionID))
@@ -105,6 +115,21 @@ func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) err
 	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove %q: %w", path, err)
+		}
+	}
+	// Drop the per-session directory only once nothing else lives in it;
+	// anything unexpected there is preserved rather than deleted blindly.
+	dir := s.SessionDir(archiveSessionID)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read session directory %q: %w", dir, err)
+	}
+	if len(entries) == 0 {
+		if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove session directory %q: %w", dir, err)
 		}
 	}
 	return nil

@@ -46,6 +46,9 @@ func TestFeedbackFileIsFilteredBeforeRequestPersistence(t *testing.T) {
 	if evidence.Provenance != "user:agent-archive-feedback-file" || evidence.Payload["redacted"] != true || strings.Contains(text, "synthetic-secret-value") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("evidence=%#v", evidence)
 	}
+	if gaps, _ := evidence.Payload["gaps"].([]any); len(gaps) != 1 || gaps[0] != "sensitive_content_redacted" || evidence.Payload["truncated"] != nil {
+		t.Fatalf("gap labels=%#v", evidence.Payload)
+	}
 	encoded, err := json.Marshal(requests)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +107,7 @@ func TestFeedbackRejectsSessionExcludedByCurrentSetup(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	requests, err := store.LoadRequests()
-	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Kind != archive.EvidenceKindLifecycleHook {
+	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Kind != archive.EvidenceKindLifecycleHook || !requests[0].Deferred {
 		t.Fatalf("requests=%#v err=%v", requests, err)
 	}
 }
