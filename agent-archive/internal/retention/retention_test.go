@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,22 +108,29 @@ func TestSweepRespectsGracePeriodBeforeDeletingSupersededSource(t *testing.T) {
 		t.Fatalf("superseded source must survive within the grace period: %v", err)
 	}
 
-	// Sweep after the grace period elapses.
+	// The predecessor survives indefinitely, even after its grace period.
 	later := supersededAt.Add(25 * time.Hour)
 	result, err = Sweep(context.Background(), local, store, Options{Now: func() time.Time { return later }, GracePeriod: 24 * time.Hour})
-	if err != nil {
+	if err != nil || len(result.Errors) != 0 || result.DeletedSnapshots != 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := store.Get(context.Background(), firstKey); err != nil {
 		t.Fatal(err)
 	}
-	if result.DeletedSnapshots != 1 {
-		t.Fatalf("result=%#v", result)
+	// A third publication makes the first source eligible, but retains second.
+	secondKey := fetchMetadata(t, store, "codex", "s1").SourceBundle.Key
+	publishThird(t, local, store, "s1", dir, later)
+	result, err = Sweep(context.Background(), local, store, Options{Now: func() time.Time { return later.Add(25 * time.Hour) }})
+	if err != nil || len(result.Errors) != 0 || result.DeletedSnapshots != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if _, err := store.Get(context.Background(), firstKey); err == nil {
-		t.Fatal("expected the superseded source to be deleted after the grace period")
+		t.Fatal("older source survives")
 	}
-	remaining, err := local.LoadSuperseded("s1")
-	if err != nil || len(remaining) != 0 {
-		t.Fatalf("ledger should be empty after deletion: %#v err=%v", remaining, err)
+	if _, err := store.Get(context.Background(), secondKey); err != nil {
+		t.Fatal("predecessor deleted", err)
 	}
+
 }
 
 func TestSweepNeverDeletesTheCurrentSource(t *testing.T) {
@@ -225,6 +234,8 @@ func TestSweepIsolatesOneSessionsFailure(t *testing.T) {
 	firstKeyA := publishTwice(t, local, memStore, "a", dir, t0)
 	_ = publishTwice(t, local, memStore, "b", dir, t0)
 
+	publishThird(t, local, memStore, "a", dir, t0.Add(time.Hour))
+	publishThird(t, local, memStore, "b", dir, t0.Add(time.Hour))
 	store := failingDeleteStore{ObjectStore: memStore, failKey: firstKeyA}
 	later := t0.Add(10*time.Minute + 25*time.Hour)
 	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return later }, GracePeriod: 24 * time.Hour})
@@ -239,45 +250,263 @@ func TestSweepIsolatesOneSessionsFailure(t *testing.T) {
 	}
 }
 
-// TestSweepAbortsSessionWhenCurrentSourceKeyCannotBeRecomputed guards the
-// "never delete a currently referenced object" guarantee against a silently
-// empty currentKey: if recomputing it fails, this must abort the session's
-// sweep (isolated, retried next pass) rather than proceed as if nothing
-// were current, which would let the "never delete current" check below be
-// defeated for a stale-but-still-superseded-ledger key that happens to
-// match the real current one.
-func TestSweepAbortsSessionWhenCurrentSourceKeyCannotBeRecomputed(t *testing.T) {
-	dir := t.TempDir()
-	local := newTestStore(t)
-	store := storage.NewMemoryStore()
-	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
-	firstKey := publishTwice(t, local, store, "s1", dir, t0)
-
-	// Corrupt the cached "current" bundle so recomputing its source key
-	// fails deterministically. Real registrations never produce an unsafe
-	// ArchiveSessionID (it's generated internally, not harness input); this
-	// simulates an unexpected failure in that recomputation step itself.
-	bundle, publishedAt, status, found, err := local.LoadPublished("s1")
-	if err != nil || !found {
-		t.Fatalf("found=%v err=%v", found, err)
-	}
-	bundle.ArchiveSessionID = "unsafe/id"
-	if err := local.SavePublished("s1", bundle, publishedAt, status); err != nil {
-		t.Fatal(err)
-	}
-
-	later := t0.Add(10*time.Minute + 25*time.Hour) // past the grace period
-	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return later }, GracePeriod: 24 * time.Hour})
+func publishThird(t *testing.T, local *collector.LocalStore, store storage.ObjectStore, id, dir string, at time.Time) {
+	t.Helper()
+	path := filepath.Join(dir, id+".jsonl")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := result.Errors["s1"]; !ok {
-		t.Fatalf("expected the session to report an error rather than silently proceed: %#v", result)
+	if err := os.WriteFile(path, append(data, []byte("\n"+`{"type":"response_item","id":"m3","payload":{"type":"message","role":"user","content":"third"}}`)...), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if result.DeletedSnapshots != 0 {
-		t.Fatalf("must not delete anything when the current source key could not be confirmed: %#v", result)
+	result, err := collector.Run(context.Background(), local, store, collector.Options{MachineID: "m", Now: func() time.Time { return at }})
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("%#v %v", result, err)
 	}
-	if _, err := store.Get(context.Background(), firstKey); err != nil {
-		t.Fatalf("the superseded (and possibly-current) source must survive when the safety check itself fails: %v", err)
+}
+
+func TestSweepFailsClosedWithUnreadableCurrentMetadata(t *testing.T) {
+	local := newTestStore(t)
+	store := storage.NewMemoryStore()
+	at := time.Now()
+	dir := t.TempDir()
+	first := publishTwice(t, local, store, "s1", dir, at)
+	second := fetchMetadata(t, store, "codex", "s1").SourceBundle.Key
+	// Two superseded snapshots past their grace period, so the sweep would
+	// delete the older one if it could trust the current pointer.
+	publishThird(t, local, store, "s1", dir, at.Add(time.Hour))
+	key, _ := archive.MetadataObjectKey("codex", "s1")
+	if err := store.Put(context.Background(), key, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return at.Add(48 * time.Hour) }})
+	if err != nil || result.Errors["s1"] == nil || result.DeletedSnapshots != 0 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	for _, k := range []string{first, second} {
+		if _, err := store.Get(context.Background(), k); err != nil {
+			t.Fatal(k, err)
+		}
+	}
+}
+
+func TestWholeSessionDeletionFailureNeverLeavesDanglingPointer(t *testing.T) {
+	for _, failMetadata := range []bool{true, false} {
+		t.Run(fmt.Sprint(failMetadata), func(t *testing.T) {
+			local := newTestStore(t)
+			mem := storage.NewMemoryStore()
+			at := time.Now()
+			publishTwice(t, local, mem, "s1", t.TempDir(), at)
+			meta := fetchMetadata(t, mem, "codex", "s1")
+			key, _ := archive.MetadataObjectKey("codex", "s1")
+			failKey := meta.SourceBundle.Key
+			if failMetadata {
+				failKey = key
+			}
+			store := failingDeleteStore{ObjectStore: mem, failKey: failKey}
+			opts := Options{Now: func() time.Time { return at.Add(100 * 24 * time.Hour) }, SessionMaxAge: 90 * 24 * time.Hour}
+			result, err := Sweep(context.Background(), local, store, opts)
+			if err != nil || result.Errors["s1"] == nil {
+				t.Fatalf("%#v %v", result, err)
+			}
+			if _, err := mem.Get(context.Background(), key); err == nil {
+				if _, err := mem.Get(context.Background(), meta.SourceBundle.Key); err != nil {
+					t.Fatal("dangling pointer")
+				}
+			} else if failMetadata {
+				t.Fatal("metadata deleted despite failure")
+			}
+			result, err = Sweep(context.Background(), local, mem, opts)
+			if err != nil || len(result.Errors) != 0 || len(result.DeletedSessions) != 1 {
+				t.Fatalf("retry: %#v %v", result, err)
+			}
+			objects, err := mem.List(context.Background(), "sessions/codex/s1/")
+			if err != nil || len(objects) != 0 {
+				t.Fatalf("%#v %v", objects, err)
+			}
+		})
+	}
+}
+
+func TestRetentionProtectsNewerRemoteCaptureAndClockRollbackPredecessor(t *testing.T) {
+	local := newTestStore(t)
+	remote := storage.NewMemoryStore()
+	at := time.Now().UTC()
+	dir := t.TempDir()
+	first := publishTwice(t, local, remote, "s1", dir, at)
+	second := fetchMetadata(t, remote, "codex", "s1").SourceBundle.Key
+	publishThird(t, local, remote, "s1", dir, at.Add(time.Hour))
+	ledger, err := local.LoadSuperseded("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The second supersession happened after clock correction, but is newer in order.
+	ledger[0].SupersededAt = at.Add(2 * time.Hour)
+	ledger[1].SupersededAt = at
+	for _, entry := range ledger {
+		if err := local.RemoveSuperseded("s1", entry.Key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range ledger {
+		if err := local.RecordSuperseded("s1", entry.Key, entry.SupersededAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Sweep(context.Background(), local, remote, Options{Now: func() time.Time { return at.Add(48 * time.Hour) }})
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	if _, err := remote.Get(context.Background(), first); err == nil {
+		t.Fatal("older snapshot retained")
+	}
+	if _, err := remote.Get(context.Background(), second); err != nil {
+		t.Fatal("immediate predecessor deleted", err)
+	}
+	// Simulate remote success with stale local acknowledgement before expiry.
+	metadata := fetchMetadata(t, remote, "codex", "s1")
+	metadata.CapturedAt = at.Add(95 * 24 * time.Hour)
+	key, _ := archive.MetadataObjectKey("codex", "s1")
+	data, _ := json.Marshal(metadata)
+	if err := remote.Put(context.Background(), key, data); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Sweep(context.Background(), local, remote, Options{Now: func() time.Time { return at.Add(100 * 24 * time.Hour) }, SessionMaxAge: 90 * 24 * time.Hour})
+	if err != nil || len(result.Errors) != 0 || len(result.DeletedSessions) != 0 {
+		t.Fatalf("deleted newer remote evidence: %#v %v", result, err)
+	}
+	if _, err := remote.Get(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pointCurrentAt rewrites a session's remote metadata so it references key,
+// simulating a publication that made key the current source.
+func pointCurrentAt(t *testing.T, store storage.ObjectStore, id, key string) {
+	t.Helper()
+	metadata := fetchMetadata(t, store, "codex", id)
+	sha := strings.TrimSuffix(strings.TrimPrefix(key, fmt.Sprintf("sessions/codex/%s/source.", id)), ".json.gz")
+	if len(sha) != 64 {
+		t.Fatalf("unexpected source key %q", key)
+	}
+	if _, err := store.Get(context.Background(), key); errors.Is(err, storage.ErrNotFound) {
+		if err := store.Put(context.Background(), key, []byte("snapshot")); err != nil {
+			t.Fatal(err)
+		}
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	metadata.SourceBundle = archive.SourceReference{Key: key, SHA256: sha, CompressedBytes: 8}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataKey, _ := archive.MetadataObjectKey("codex", id)
+	if err := store.Put(context.Background(), metadataKey, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A -> B -> A -> C: A is superseded twice. The immediate predecessor of C is
+// A, so the sweep must retain A and expire B, not the reverse.
+func TestSweepKeepsTruePredecessorAfterContentReversion(t *testing.T) {
+	local := newTestStore(t)
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	a := publishTwice(t, local, store, "s1", t.TempDir(), t0) // ledger [A]; current B
+	b := fetchMetadata(t, store, "codex", "s1").SourceBundle.Key
+	c := fmt.Sprintf("sessions/codex/s1/source.%s.json.gz", strings.Repeat("c", 64))
+
+	// Content reverts to A, superseding B; then C supersedes A again.
+	t2 := t0.Add(time.Hour)
+	if err := local.RecordSuperseded("s1", b, t2); err != nil {
+		t.Fatal(err)
+	}
+	pointCurrentAt(t, store, "s1", a)
+	t3 := t2.Add(time.Hour)
+	if err := local.RecordSuperseded("s1", a, t3); err != nil {
+		t.Fatal(err)
+	}
+	pointCurrentAt(t, store, "s1", c)
+
+	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return t3.Add(25 * time.Hour) }, GracePeriod: 24 * time.Hour})
+	if err != nil || len(result.Errors) != 0 || result.DeletedSnapshots != 1 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	if _, err := store.Get(context.Background(), a); err != nil {
+		t.Fatal("true predecessor A deleted:", err)
+	}
+	if _, err := store.Get(context.Background(), b); err == nil {
+		t.Fatal("older snapshot B retained")
+	}
+	if _, err := store.Get(context.Background(), c); err != nil {
+		t.Fatal("current C deleted:", err)
+	}
+	ledger, err := local.LoadSuperseded("s1")
+	if err != nil || len(ledger) != 1 || ledger[0].Key != a {
+		t.Fatalf("ledger=%#v err=%v", ledger, err)
+	}
+}
+
+// countingStore counts Get calls, to assert a sweep skipped the remote
+// metadata read when it could not have deleted anything.
+type countingStore struct {
+	storage.ObjectStore
+	gets int
+}
+
+func (c *countingStore) Get(ctx context.Context, key string) ([]byte, error) {
+	c.gets++
+	return c.ObjectStore.Get(ctx, key)
+}
+
+func TestSweepSkipsRemoteReadWhenNothingIsExpirable(t *testing.T) {
+	local := newTestStore(t)
+	mem := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	first := publishTwice(t, local, mem, "s1", dir, t0) // ledger [first]: the predecessor
+	supersededAt := t0.Add(10 * time.Minute)
+	store := &countingStore{ObjectStore: mem}
+
+	// Within grace, past grace (predecessor only), and within the session
+	// retention window: nothing could be deleted, so no remote read.
+	for _, opts := range []Options{
+		{Now: func() time.Time { return supersededAt.Add(time.Hour) }, GracePeriod: 24 * time.Hour},
+		{Now: func() time.Time { return supersededAt.Add(400 * 24 * time.Hour) }, GracePeriod: 24 * time.Hour},
+		{Now: func() time.Time { return supersededAt.Add(30 * 24 * time.Hour) }, GracePeriod: 24 * time.Hour, SessionMaxAge: 90 * 24 * time.Hour},
+	} {
+		result, err := Sweep(context.Background(), local, store, opts)
+		if err != nil || len(result.Errors) != 0 || result.DeletedSnapshots != 0 || len(result.DeletedSessions) != 0 {
+			t.Fatalf("%#v %v", result, err)
+		}
+	}
+	if store.gets != 0 {
+		t.Fatalf("idle sweep must not read remote metadata; gets=%d", store.gets)
+	}
+
+	// A second superseded snapshot past its grace period is deletable, so
+	// the sweep must read the current pointer and act.
+	publishThird(t, local, mem, "s1", dir, supersededAt.Add(time.Hour))
+	result, err := Sweep(context.Background(), local, store, Options{Now: func() time.Time { return supersededAt.Add(30 * time.Hour) }, GracePeriod: 24 * time.Hour})
+	if err != nil || len(result.Errors) != 0 || result.DeletedSnapshots != 1 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	if store.gets != 1 {
+		t.Fatalf("expected exactly one remote metadata read; gets=%d", store.gets)
+	}
+	if _, err := mem.Get(context.Background(), first); err == nil {
+		t.Fatal("older snapshot retained")
+	}
+
+	// Locally expired session: the remote read is required to confirm.
+	store.gets = 0
+	result, err = Sweep(context.Background(), local, store, Options{Now: func() time.Time { return supersededAt.Add(100 * 24 * time.Hour) }, SessionMaxAge: 90 * 24 * time.Hour})
+	if err != nil || len(result.Errors) != 0 || len(result.DeletedSessions) != 1 {
+		t.Fatalf("%#v %v", result, err)
+	}
+	if store.gets != 1 {
+		t.Fatalf("expiry must validate the remote pointer; gets=%d", store.gets)
 	}
 }

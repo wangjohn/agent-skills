@@ -551,3 +551,31 @@ func TestRunFallsBackToCursorTextWhenJSONLIsUnrecognized(t *testing.T) {
 		t.Fatalf("expected a verified source reference: %#v", metadata)
 	}
 }
+
+func TestRecordSupersededMovesRepeatedKeyToEnd(t *testing.T) {
+	local := newTestStore(t)
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	// A -> B -> A -> C: A is superseded twice, B once in between.
+	for _, step := range []struct {
+		key string
+		at  time.Time
+	}{
+		{"sessions/codex/s1/source.a.json.gz", t0},
+		{"sessions/codex/s1/source.b.json.gz", t0.Add(time.Hour)},
+		{"sessions/codex/s1/source.a.json.gz", t0.Add(2 * time.Hour)},
+	} {
+		if err := local.RecordSuperseded("s1", step.key, step.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledger, err := local.LoadSuperseded("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 2 || ledger[0].Key != "sessions/codex/s1/source.b.json.gz" || ledger[1].Key != "sessions/codex/s1/source.a.json.gz" {
+		t.Fatalf("re-superseded key must move to the end of the ledger: %#v", ledger)
+	}
+	if !ledger[1].SupersededAt.Equal(t0.Add(2 * time.Hour)) {
+		t.Fatalf("re-superseded key must refresh SupersededAt: %#v", ledger[1])
+	}
+}

@@ -24,11 +24,15 @@ func (s *LocalStore) supersededPath(archiveSessionID string) string {
 }
 
 // RecordSuperseded appends key to a session's superseded-source ledger, so
-// a later retention sweep can delete it once its grace period elapses. It
-// is a no-op if key is already recorded (a session republished more than
-// once before a sweep ever ran must not lose track of an earlier
-// supersession, so each is tracked individually rather than only the most
-// recent one).
+// a later retention sweep can delete it once its grace period elapses. A
+// session republished more than once before a sweep ever runs must not
+// lose track of an earlier supersession, so each key is tracked
+// individually rather than only the most recent one. If key is already
+// recorded (content reverted to an earlier snapshot and was then
+// superseded again), the entry moves to the end of the ledger with a fresh
+// SupersededAt: append order is the supersession order retention relies
+// on to identify the immediate predecessor of the current snapshot, so
+// the most recently superseded key must always be last.
 func (s *LocalStore) RecordSuperseded(archiveSessionID, key string, at time.Time) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
@@ -37,13 +41,14 @@ func (s *LocalStore) RecordSuperseded(archiveSessionID, key string, at time.Time
 	if err != nil {
 		return err
 	}
+	out := make([]SupersededSource, 0, len(existing)+1)
 	for _, e := range existing {
-		if e.Key == key {
-			return nil
+		if e.Key != key {
+			out = append(out, e)
 		}
 	}
-	existing = append(existing, SupersededSource{Key: key, SupersededAt: at})
-	return local.Write(s.supersededPath(archiveSessionID), existing)
+	out = append(out, SupersededSource{Key: key, SupersededAt: at})
+	return local.Write(s.supersededPath(archiveSessionID), out)
 }
 
 // LoadSuperseded returns a session's superseded-source ledger.
