@@ -158,6 +158,23 @@ is not a scripting API. Supply secrets only through a private input stream;
 never use secret command arguments or commit input files. For a terminal,
 secret input fails rather than falling back to visible keystrokes.
 
+## Upgrade notes
+
+- Read-back evidence is now keyed per session to the application, project
+  root, and project activation time, and the storage access record gained a
+  capability contract field. The first run after upgrading therefore
+  invalidates every existing `verification.json` and `storage-health.json`
+  once: `status` reports authentication as `stale_configuration` and every
+  publication as read-back pending until the next `sync` or background tick
+  re-verifies it. Read-back is capped per pass, so a large archive recovers
+  over several passes; nothing is re-uploaded.
+- A project that is removed and later re-added gets a fresh activation time.
+  Sessions registered before that time are no longer accepted for that
+  project: status leaves them out, the collector, read-back verification, and
+  `feedback` skip them, and the retention sweep no longer deletes their
+  remote objects. Their earlier publications stay in the bucket until removed
+  by hand.
+
 ## Inspecting what was archived
 
 Once sessions have been published, two read-only commands show what is in

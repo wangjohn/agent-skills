@@ -89,11 +89,32 @@ func configurationID(cfg config.Config) string {
 	// These fields contain references, never credentials. Pausing, retention,
 	// and unrelated historical settings do not invalidate capture verification.
 	data, _ := json.Marshal(struct {
-		Storage   any
-		Harnesses []string
-		Machine   string
-		Since     time.Time
-	}{cfg.Storage, cfg.Harnesses, cfg.MachineID, cfg.DestinationSince})
+		Storage            any
+		Harnesses          []string
+		Machine            string
+		Since              time.Time
+		CapabilityContract int
+	}{cfg.Storage, cfg.Harnesses, cfg.MachineID, cfg.DestinationSince, 1})
+	return storage.SHA256Hex(data)
+}
+
+func sessionVerificationConfigurationID(cfg config.Config, reg archive.SessionRegistration) string {
+	var activation time.Time
+	for _, project := range cfg.Archive.Projects {
+		if project.Included && project.Root == reg.ProjectRoot {
+			activation = project.ActivatedAt
+			break
+		}
+	}
+	data, _ := json.Marshal(struct {
+		Storage            any
+		Machine            string
+		DestinationSince   time.Time
+		Harness            string
+		ProjectRoot        string
+		ProjectActivatedAt time.Time
+		CapabilityContract int
+	}{cfg.Storage, cfg.MachineID, cfg.DestinationSince, reg.Harness.Name, reg.ProjectRoot, activation, 1})
 	return storage.SHA256Hex(data)
 }
 func verificationPath(home, id string) string {
@@ -161,12 +182,14 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 		return summary, err
 	}
 	now := env.now().UTC()
-	cfgID := configurationID(cfg)
 	type candidate struct {
 		reg    archive.SessionRegistration
 		bundle archive.SourceBundle
 		at     time.Time
 		prior  verificationEvidence
+		// cfgID is the per-session verification configuration hash the
+		// record is keyed to (see sessionVerificationConfigurationID).
+		cfgID string
 	}
 	var due []candidate
 	for _, reg := range regs {
@@ -184,7 +207,8 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 		if err != nil {
 			return summary, err
 		}
-		if prior.ConfigurationID == cfgID && prior.PublishedAt.Equal(at) {
+		verificationConfigurationID := sessionVerificationConfigurationID(cfg, reg)
+		if prior.ConfigurationID == verificationConfigurationID && prior.PublishedAt.Equal(at) {
 			if !prior.VerifiedAt.IsZero() {
 				continue
 			}
@@ -196,7 +220,7 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 			// A new publication or configuration starts its own attempt count.
 			prior = verificationEvidence{}
 		}
-		due = append(due, candidate{reg, bundle, at, prior})
+		due = append(due, candidate{reg, bundle, at, prior, verificationConfigurationID})
 	}
 	sort.SliceStable(due, func(i, j int) bool { return due[i].at.Before(due[j].at) })
 	if len(due) > maxVerificationsPerPass {
@@ -206,7 +230,7 @@ func verifyPublications(home string, cfg config.Config, env Env, store *collecto
 	for _, c := range due {
 		summary.Attempted++
 		sha, err := verifyPublication(cfg, remote, c.reg, c.bundle)
-		record := verificationEvidence{ConfigurationID: cfgID, PublishedAt: c.at, SourceSHA256: sha, Attempts: c.prior.Attempts + 1}
+		record := verificationEvidence{ConfigurationID: c.cfgID, PublishedAt: c.at, SourceSHA256: sha, Attempts: c.prior.Attempts + 1}
 		switch {
 		case err == nil:
 			summary.Verified++
