@@ -242,23 +242,36 @@ func openConfiguredStore(cfg config.Config) (storage.ObjectStore, error) {
 	return storage.NewConfiguredStore(context.Background(), cfg.Storage, keychain)
 }
 
-// Share one bounded observation per harness/project within a pass.
+// skillObserver shares bounded observations within a pass: user-scope skill
+// roots are read once per harness, project-scope roots once per
+// harness/project. Each read carries its own instruction-content cap, so a
+// pass reads at most that cap per harness plus that cap per project.
 func skillObserver(env Env) func(archive.SessionRegistration, time.Time) ([]archive.SupplementalEvidence, error) {
-	cache := map[string][]archive.SupplementalEvidence{}
+	userCache := map[string][]archive.SupplementalEvidence{}
+	projectCache := map[string][]archive.SupplementalEvidence{}
 	return func(reg archive.SessionRegistration, at time.Time) ([]archive.SupplementalEvidence, error) {
-		key := reg.Harness.Name + "\x00" + reg.ProjectRoot
-		if prior, ok := cache[key]; ok {
-			return prior, nil
+		userScope, ok := userCache[reg.Harness.Name]
+		if !ok {
+			userHome, err := env.userHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			userScope, err = evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, UserHome: userHome, ObservedAt: at})
+			if err != nil {
+				return nil, err
+			}
+			userCache[reg.Harness.Name] = userScope
 		}
-		userHome, err := env.userHomeDir()
-		if err != nil {
-			return nil, err
+		projectKey := reg.Harness.Name + "\x00" + reg.ProjectRoot
+		projectScope, ok := projectCache[projectKey]
+		if !ok {
+			var err error
+			projectScope, err = evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, ProjectRoot: reg.ProjectRoot, ObservedAt: at})
+			if err != nil {
+				return nil, err
+			}
+			projectCache[projectKey] = projectScope
 		}
-		observed, err := evidence.ObserveSkills(evidence.SkillOptions{Harness: reg.Harness.Name, ProjectRoot: reg.ProjectRoot, UserHome: userHome, ObservedAt: at})
-		if err != nil {
-			return nil, err
-		}
-		cache[key] = observed
-		return observed, nil
+		return append(append([]archive.SupplementalEvidence(nil), userScope...), projectScope...), nil
 	}
 }

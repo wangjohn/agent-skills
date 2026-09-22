@@ -16,19 +16,24 @@ import (
 )
 
 type appStatus struct {
-	PublishedSessions int                  `json:"published_sessions"`
-	VerifiedSessions  int                  `json:"verified_sessions"`
-	Configured        bool                 `json:"configured"`
-	HookObserved      bool                 `json:"hook_observed"`
-	CapturedLocally   bool                 `json:"captured_locally"`
-	Published         bool                 `json:"published"`
-	ReadBackVerified  bool                 `json:"read_back_verified"`
-	VerifiedAt        time.Time            `json:"verified_at,omitempty"`
-	VerificationState string               `json:"verification_state"`
-	Trust             string               `json:"trust"`
-	HarnessVersions   []string             `json:"observed_harness_versions,omitempty"`
-	AdapterVersions   []string             `json:"observed_adapter_versions,omitempty"`
-	CaptureGaps       []archive.CaptureGap `json:"capture_gaps,omitempty"`
+	PublishedSessions int       `json:"published_sessions"`
+	VerifiedSessions  int       `json:"verified_sessions"`
+	Configured        bool      `json:"configured"`
+	HookObserved      bool      `json:"hook_observed"`
+	CapturedLocally   bool      `json:"captured_locally"`
+	Published         bool      `json:"published"`
+	ReadBackVerified  bool      `json:"read_back_verified"`
+	VerifiedAt        time.Time `json:"verified_at,omitempty"`
+	VerificationState string    `json:"verification_state"`
+	Trust             string    `json:"trust"`
+	HarnessVersions   []string  `json:"observed_harness_versions,omitempty"`
+	AdapterVersions   []string  `json:"observed_adapter_versions,omitempty"`
+	// CaptureGaps lists recorded gaps: sessions whose current transcript can
+	// no longer be captured (rewritten or over the size limit), per-session
+	// scan issues, and gaps recorded inside captured bundles. A blocked
+	// session's last published snapshot, if any, stays retained. These are
+	// recorded gaps, not errors.
+	CaptureGaps []archive.CaptureGap `json:"capture_gaps,omitempty"`
 
 	Code            string    `json:"code"`
 	Hooks           string    `json:"hooks"`
@@ -81,7 +86,11 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	fmt.Fprintf(stdout, "Projects:      %d included\nPending:       %d session(s)\nLast scan:     %s\nLast publish:  %s\n", len(view.Projects), view.Collector.PendingCount, formatTimeOrNever(view.Collector.LastScanAt), formatTimeOrNever(view.Collector.LastPublishedAt))
 	for _, app := range view.Apps {
-		fmt.Fprintf(stdout, "%s: %s (%d session(s)); hooks %s\n", appName(app.Name), app.State, app.Sessions, app.Hooks)
+		gaps := ""
+		if len(app.CaptureGaps) > 0 {
+			gaps = fmt.Sprintf("; %d with a capture gap", len(app.CaptureGaps))
+		}
+		fmt.Fprintf(stdout, "%s: %s (%d session(s)%s); hooks %s\n", appName(app.Name), app.State, app.Sessions, gaps, app.Hooks)
 		if !app.VerifiedAt.IsZero() {
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
 		}
@@ -174,18 +183,29 @@ func readStatus(env Env) (view statusView, err error) {
 			if app.State == "waiting for first session" {
 				app.State = "hook observed; waiting for capture"
 			}
-			bundle, at, _, found, err := store.LoadPublished(reg.ArchiveSessionID)
+			bundle, at, state, found, err := store.LoadPublished(reg.ArchiveSessionID)
 			if err != nil {
 				return view, err
 			}
+			if state == collector.CacheStatusBlocked {
+				reason, _, e := store.LoadBlocked(reg.ArchiveSessionID)
+				if e != nil {
+					return view, e
+				}
+				app.CaptureGaps = append(app.CaptureGaps, archive.CaptureGap{Code: string(reason), Detail: "The current transcript can no longer be captured; the last published snapshot, if any, stays retained."})
+			}
 			if found {
-				app.CapturedLocally = true
+				if state != collector.CacheStatusBlocked {
+					app.CapturedLocally = true
+				}
 				app.CaptureGaps = append(app.CaptureGaps, bundle.Capture.Gaps...)
 				if version := bundle.Capture.AdapterVersion; version != "" && !containsString(app.AdapterVersions, version) {
 					app.AdapterVersions = append(app.AdapterVersions, version)
 				}
 			}
-			if found && app.LastPublishedAt.IsZero() {
+			// A blocked session with no publication has captured nothing;
+			// one that was published earlier still counts as published below.
+			if found && state != collector.CacheStatusBlocked && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
 			_, actualAt, published, e := store.LoadLastPublished(reg.ArchiveSessionID)

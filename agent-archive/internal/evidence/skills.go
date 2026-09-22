@@ -44,6 +44,10 @@ type skillRoot struct {
 // not claim that the harness discovered, exposed, or invoked a skill in this
 // session. The returned evidence has already passed the archive privacy
 // filter and is safe to place in a local upload request or source candidate.
+//
+// A skills directory the collector cannot read is a coverage gap for that
+// root, never a reason to withhold the session: an unreadable root yields an
+// "unreadable" inventory and an unreadable entry counts as uninspected.
 func ObserveSkills(options SkillOptions) ([]archive.SupplementalEvidence, error) {
 	if options.ObservedAt.IsZero() {
 		return nil, errors.New("skill observation time is required")
@@ -103,7 +107,10 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 		return []archive.SupplementalEvidence{inventoryObservation(harness, root.scope, "absent", nil, true, observedAt)}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s skill inventory: %w", root.scope, err)
+		// Not a directory, permission denied, or any other read failure: the
+		// root exists but its inventory is unknown. Record that instead of
+		// failing publication of a session over an unrelated directory.
+		return []archive.SupplementalEvidence{inventoryObservation(harness, root.scope, "unreadable", nil, false, observedAt)}, nil
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	omittedEntries := 0
@@ -132,7 +139,9 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("inspect %s skill %q: %w", root.scope, entry.Name(), err)
+			// Permission denied on the entry or its SKILL.md: coverage gap.
+			uninspectedEntries++
+			continue
 		}
 		name := entry.Name()
 		payload := map[string]any{
@@ -151,7 +160,8 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 		}
 		original, err := readBounded(path, maxSkillBytes)
 		if err != nil {
-			return nil, fmt.Errorf("read %s skill %q: %w", root.scope, entry.Name(), err)
+			uninspectedEntries++
+			continue
 		}
 		*remainingSnapshotBytes -= int64(len(original))
 		if parsed := frontmatterName(original); parsed != "" {
@@ -172,9 +182,7 @@ func observeRoot(harness string, root skillRoot, observedAt time.Time, remaining
 		if len(filtered) == 0 {
 			continue
 		}
-		if len(gaps) > 0 {
-			filtered[0].Payload["redacted"] = true
-		}
+		archive.AnnotateSupplementalGaps(filtered[0].Payload, gaps)
 		inventory = append(inventory, map[string]any{"name": name, "sha256": hash})
 		snapshots = append(snapshots, filtered[0])
 	}
