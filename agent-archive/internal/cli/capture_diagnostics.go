@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
 	"github.com/wangjohn/agent-skills/agent-archive/internal/local"
 )
 
@@ -58,6 +59,37 @@ func recordCaptureDiagnostic(home string, diagnostic captureDiagnostic) error {
 	sort.Slice(kept, func(i, j int) bool { return kept[i].ObservedAt.Before(kept[j].ObservedAt) })
 	if len(kept) > 50 {
 		kept = kept[len(kept)-50:]
+	}
+	return local.Write(captureDiagnosticsPath(home), kept)
+}
+
+// includedCaptureDiagnostics keeps only diagnostics for projects that are
+// currently included. A diagnostic is recorded only for an included project,
+// but the project may be excluded later; its path must then stop appearing
+// in status, not linger until newer entries push it out.
+func includedCaptureDiagnostics(diagnostics []captureDiagnostic, projects []archive.ProjectActivation) []captureDiagnostic {
+	kept := make([]captureDiagnostic, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		for _, project := range projects {
+			if project.Included && filepath.Clean(project.Root) == filepath.Clean(diagnostic.ProjectRoot) {
+				kept = append(kept, diagnostic)
+				break
+			}
+		}
+	}
+	return kept
+}
+
+// pruneCaptureDiagnostics drops stored diagnostics for projects that are no
+// longer included, so an excluded path is not kept on disk either.
+func pruneCaptureDiagnostics(home string, projects []archive.ProjectActivation) error {
+	diagnostics, err := readCaptureDiagnostics(home)
+	if err != nil {
+		return err
+	}
+	kept := includedCaptureDiagnostics(diagnostics, projects)
+	if len(kept) == len(diagnostics) {
+		return nil
 	}
 	return local.Write(captureDiagnosticsPath(home), kept)
 }

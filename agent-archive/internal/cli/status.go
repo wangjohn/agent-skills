@@ -153,6 +153,7 @@ func readStatus(env Env) (view statusView, err error) {
 	if err != nil {
 		return view, err
 	}
+	view.CaptureDiagnostics = includedCaptureDiagnostics(view.CaptureDiagnostics, cfg.Archive.Projects)
 	view.Authentication.State = "unknown"
 	if err := local.Read(filepath.Join(home, "storage-health.json"), &view.Authentication); err != nil && !os.IsNotExist(err) {
 		return view, err
