@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,6 +29,15 @@ const archiveSessionsPrefix = "sessions"
 // when setup has never run. It is deliberately the same line `status`
 // prints, so a first-time user gets one consistent answer.
 const notSetUpMessage = "Not set up. Run `agent-archive setup` to get started."
+
+// eligibleNoUseUnavailableMessage is what `list --skill-usage eligible_no_use`
+// prints, with exit 0 and no rows. No parser version records both a complete
+// eligible-skill set and complete use observation, so no sidecar carries the
+// observed_none detection the query compares against and it can match nothing.
+// help.go and docs/install.md state the same thing in the same words.
+const eligibleNoUseUnavailableMessage = "--skill-usage eligible_no_use cannot return sessions yet: no parser version\n" +
+	"records both a complete eligible-skill set and complete use observation, so\n" +
+	"non-use is never proven. The value stays accepted for forward compatibility."
 
 // openReadOnlyStore loads configuration and opens the configured object
 // store the same way a collector pass does (env.openStore), but without the
@@ -63,7 +73,8 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	harness := fs.String("harness", "", "only sessions from this harness (codex, claude, cursor)")
 	model := fs.String("model", "", "only sessions that requested or observed this model")
 	skill := fs.String("skill", "", "only sessions involving this skill (see --skill-usage)")
-	skillUsage := fs.String("skill-usage", string(reader.SkillUsageUsed), "with --skill: used, available, or eligible_no_use")
+	skillSHA256 := fs.String("skill-sha256", "", "only sessions involving this exact lowercase skill SHA-256")
+	skillUsage := fs.String("skill-usage", string(reader.SkillUsageUsed), "with --skill/--skill-sha256: used, available, or eligible_no_use")
 	since := fs.String("since", "", "only sessions captured at or after this date (2026-01-31), RFC 3339 time, or age (7d, 12h)")
 	complete := fs.Bool("complete", false, "only sessions with complete parser coverage and no capture gaps")
 	if err := fs.Parse(args); err != nil {
@@ -73,14 +84,35 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "agent-archive: list: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, RequireCompleteCoverage: *complete}
-	switch usage := reader.SkillUsage(*skillUsage); usage {
+	if *skillSHA256 != "" && !validLowerSHA256(*skillSHA256) {
+		fmt.Fprintln(stderr, "agent-archive: list: --skill-sha256 must be exactly 64 lowercase hexadecimal characters")
+		return 2
+	}
+	// The value is checked before the --skill/--skill-sha256 requirement so
+	// that a misspelled value is reported as the misspelling it is, rather
+	// than as a missing companion flag.
+	usage := reader.SkillUsage(*skillUsage)
+	switch usage {
 	case reader.SkillUsageUsed, reader.SkillUsageAvailable, reader.SkillUsageEligibleNoUse:
-		filter.SkillUsage = usage
 	default:
 		fmt.Fprintf(stderr, "agent-archive: list: --skill-usage must be used, available, or eligible_no_use, not %q\n", *skillUsage)
 		return 2
 	}
+	if usage != reader.SkillUsageUsed && *skill == "" && *skillSHA256 == "" {
+		fmt.Fprintln(stderr, "agent-archive: list: --skill-usage requires --skill or --skill-sha256")
+		return 2
+	}
+	// No parser version records both a complete eligible-skill set and
+	// complete use observation, so nothing in the bucket can carry the
+	// observed_none detection this query compares against. Say so instead
+	// of scanning metadata and reporting an empty result that reads like an
+	// answer. The value stays accepted so scripts keep working once a
+	// parser version emits that evidence.
+	if usage == reader.SkillUsageEligibleNoUse {
+		fmt.Fprintln(stdout, eligibleNoUseUnavailableMessage)
+		return 0
+	}
+	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, SkillSHA256: *skillSHA256, RequireCompleteCoverage: *complete, SkillUsage: usage}
 	if *since != "" {
 		from, err := parseSince(*since, env.now())
 		if err != nil {
@@ -119,6 +151,14 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	fmt.Fprintf(stdout, "%d session(s).\n", len(sessions))
 	return 0
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // runShowCommand implements `agent-archive show <archive-session-id>`. By

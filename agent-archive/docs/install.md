@@ -187,6 +187,11 @@ agent-archive list
 
 # Narrow it down. --since takes a date, an RFC 3339 time, or an age.
 agent-archive list --harness claude --model claude-opus-5 --since 7d
+agent-archive list --skill review --skill-usage available
+agent-archive list --skill review --skill-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+# --skill-usage eligible_no_use parses, but cannot return sessions yet; the
+# command says so and exits 0 without listing anything. See below.
 agent-archive list --skill review --skill-usage eligible_no_use
 agent-archive list --complete   # complete parser coverage, no capture gaps
 
@@ -246,6 +251,16 @@ and each project's skill directory once, with at most 4 MiB of instruction
 content per such read. Oversized, truncated, nested, unreadable, and
 uninspected plugin content is marked as a coverage gap rather than failing the
 session. Hooks do not perform this filesystem scan.
+
+`--skill-sha256` filters metadata only and does not download source bundles.
+This distinguishes sessions using different bytes under the same skill name.
+No parser version records both a complete eligible-skill set and complete use
+observation, so non-use is never proven and `--skill-usage eligible_no_use`
+cannot return sessions yet. Supported hook payloads do not expose that
+evidence, and the parser marks incomplete skill-usage coverage `partial`
+rather than treating a missing use event as proof of non-use. The value stays
+accepted for forward compatibility: `list` prints that explanation and exits 0
+without listing anything.
 
 ## Build from source
 
@@ -324,3 +339,11 @@ After changing buckets or storage folders, do not downgrade to a version that
 does not support `DestinationSince`. Older versions ignore this saved boundary
 and may upload earlier sessions to the new destination. Keep the current version
 until a supported downgrade procedure is available.
+
+Skill comparison metadata uses parser version `0.4.0`. Older `observed_none`
+sidecars remain readable, but are excluded from `eligible_no_use`: earlier parsers
+could infer non-use from availability alone. That exclusion is a whitelist, not a
+list of known-old version strings: a sidecar counts only when its parser version
+reads as a plain `major.minor.patch` number at or above `0.4.0`, so an empty or
+custom version string is excluded too. Normal collection regenerates metadata after a parser upgrade when retained source is available; missing historical observation
+coverage remains unknown. Multiple used hashes of the same skill are retained.

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,10 @@ const (
 	// but never used. It requires the metadata's SkillDetection to be
 	// archive.SkillDetectionObservedNone; anything else (including
 	// archive.SkillDetectionUnavailable) is treated as unknown, not "no use".
+	//
+	// No parser version emits archive.SkillDetectionObservedNone today, so
+	// this value cannot match any sidecar yet. It stays accepted, and the
+	// comparison stays implemented, for the parser version that will.
 	SkillUsageEligibleNoUse SkillUsage = "eligible_no_use"
 )
 
@@ -126,6 +131,45 @@ func FindMetadataKeys(ctx context.Context, store storage.ObjectStore, prefix, ar
 	return keys, nil
 }
 
+// eligibilityParserVersion is the lowest parser version whose observed_none
+// could rest on complete eligibility and use-observation coverage rather than
+// on inference from availability alone.
+var eligibilityParserVersion = [3]int{0, 4, 0}
+
+// parserVersionAtLeast reports whether version parses as a plain numeric
+// major.minor.patch triple at or above min. Anything unparsable — the empty
+// string, a custom collector.Options.ParserVersion override, a pre-release
+// suffix — is not at least min, because only a version this function can
+// order says which parser wrote the sidecar.
+func parserVersionAtLeast(version string, min [3]int) bool {
+	fields := strings.Split(version, ".")
+	if len(fields) != len(min) {
+		return false
+	}
+	var parsed [3]int
+	for i, field := range fields {
+		if field == "" || len(field) > 1 && field[0] == '0' {
+			return false
+		}
+		for _, r := range field {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		n, err := strconv.Atoi(field)
+		if err != nil {
+			return false
+		}
+		parsed[i] = n
+	}
+	for i := range parsed {
+		if parsed[i] != min[i] {
+			return parsed[i] > min[i]
+		}
+	}
+	return true
+}
+
 func matches(m archive.Metadata, f Filter) bool {
 	if f.Harness != "" && m.Harness.Name != f.Harness {
 		return false
@@ -164,7 +208,13 @@ func matches(m archive.Metadata, f Filter) bool {
 				}
 			}
 		}
-		eligibleNoUse := available && !used && m.SkillDetection == archive.SkillDetectionObservedNone
+		// Older parsers inferred non-use from availability alone. Those
+		// sidecars remain readable, but cannot support a no-use comparison.
+		// This is a whitelist, not a blacklist of known-legacy strings:
+		// collector.Options.ParserVersion is a real override, so a pre-0.4.0
+		// build could have written observed_none under any version string.
+		trustedDetection := parserVersionAtLeast(m.Parser.Version, eligibilityParserVersion)
+		eligibleNoUse := available && !used && trustedDetection && m.SkillDetection == archive.SkillDetectionObservedNone
 		switch f.SkillUsage {
 		case SkillUsageAvailable:
 			if !available {

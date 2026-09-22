@@ -512,10 +512,20 @@ func deriveSkills(bundle SourceBundle, nativeSkillUses []SkillUse, metadata *Met
 	available := map[string]SkillSnapshot{}
 	used := map[string]SkillUse{}
 	recordUse := func(entry SkillUse) {
-		if existing, ok := used[entry.Name]; ok && existing.SHA256 != "" {
+		if entry.SHA256 == "" {
+			for _, existing := range used {
+				if existing.Name == entry.Name && existing.SHA256 != "" {
+					return
+				}
+			}
+		} else {
+			delete(used, entry.Name+"\x00")
+		}
+		key := entry.Name + "\x00" + entry.SHA256
+		if existing, ok := used[key]; ok && existing.Evidence == SkillUseEvidenceNativeInvocation {
 			return
 		}
-		used[entry.Name] = entry
+		used[key] = entry
 	}
 	for _, evidence := range bundle.SupplementalEvidence {
 		name := firstString(evidence.Payload, "name")
@@ -561,7 +571,7 @@ func deriveSkills(bundle SourceBundle, nativeSkillUses []SkillUse, metadata *Met
 	} else {
 		for _, entry := range metadata.SkillsAvailable {
 			if entry.Coverage == SkillCoverageEligible || entry.Coverage == SkillCoverageDiscovered {
-				metadata.SkillDetection = SkillDetectionObservedNone
+				metadata.SkillDetection = SkillDetectionPartial
 				break
 			}
 		}

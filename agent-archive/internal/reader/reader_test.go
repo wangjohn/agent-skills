@@ -85,7 +85,7 @@ func TestRefreshRequiredForDeletedSource(t *testing.T) {
 
 func TestEligibleNoUseRequiresObservedEligibility(t *testing.T) {
 	f := Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}
-	m := archive.Metadata{SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageInstalledOnly}}}
+	m := archive.Metadata{Parser: archive.ParserInfo{Version: archive.DefaultParserVersion}, SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageInstalledOnly}}}
 	if matches(m, f) {
 		t.Fatal("installed_only treated as eligible")
 	}
@@ -107,6 +107,19 @@ func TestSkillAvailableEligibleEntrySurvivesLaterNonEligibleEntry(t *testing.T) 
 	}}
 	if !matches(m, f) {
 		t.Fatal("eligible entry excluded by a later non-eligible entry for the same skill name")
+	}
+}
+
+func TestSkillHashOnlyFilterMatchesExactUsedVersion(t *testing.T) {
+	m := archive.Metadata{SkillsUsed: []archive.SkillUse{
+		{Name: "review", SHA256: strings.Repeat("a", 64)},
+		{Name: "deploy", SHA256: strings.Repeat("b", 64)},
+	}}
+	if !matches(m, Filter{SkillSHA256: strings.Repeat("b", 64)}) {
+		t.Fatal("hash-only filter excluded exact used version")
+	}
+	if matches(m, Filter{SkillSHA256: strings.Repeat("c", 64)}) {
+		t.Fatal("hash-only filter matched a different version")
 	}
 }
 
@@ -135,5 +148,34 @@ func TestReadMetadataAndFindMetadataKeys(t *testing.T) {
 	}
 	if _, err = ReadMetadata(ctx, store, "sessions/codex/broken/metadata.json"); err == nil {
 		t.Fatal("sidecar without a source reference accepted")
+	}
+}
+
+// Only a parser version that parses as major.minor.patch and is at least
+// 0.4.0 may support a no-use comparison. collector.Options.ParserVersion is a
+// real override, so a pre-0.4.0 build could have written observed_none under
+// an arbitrary version string: unparsable versions must be excluded, not
+// trusted because they are absent from a list of known-old releases.
+func TestOnlyParsableParserVersionsAtOrAbove040ProveUnusedSkill(t *testing.T) {
+	for version, want := range map[string]bool{
+		"":        false,
+		"0.1.0":   false,
+		"0.2.0":   false,
+		"0.3.0":   false,
+		"0.4.0":   true,
+		"0.10.0":  true,
+		"1.0.0":   true,
+		"custom":  false,
+		"0.4":     false,
+		"0.4.0.1": false,
+		"v0.4.0":  false,
+		"0.4.0-a": false,
+		"0.04.0":  false,
+		" 0.4.0":  false,
+	} {
+		m := archive.Metadata{Parser: archive.ParserInfo{Version: version}, SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageEligible}}}
+		if got := matches(m, Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}); got != want {
+			t.Fatalf("parser version %q: matched=%v want=%v", version, got, want)
+		}
 	}
 }
