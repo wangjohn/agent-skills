@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscredentials "github.com/aws/aws-sdk-go-v2/credentials"
 	"io"
@@ -22,6 +23,7 @@ func TestPrivacyInspection(t *testing.T) {
 		{"unknown endpoint", "", "", "", "", "not_verified", 0},
 		{"denied", "s3", "", "", "", "not_verified", 3},
 		{"all blocks", "s3", "<BlockPublicAcls>true</BlockPublicAcls><IgnorePublicAcls>true</IgnorePublicAcls><BlockPublicPolicy>true</BlockPublicPolicy><RestrictPublicBuckets>true</RestrictPublicBuckets>", "", "", "verified_private", 1},
+		{"unnormalized provider", "S3 ", "<BlockPublicAcls>true</BlockPublicAcls><IgnorePublicAcls>true</IgnorePublicAcls><BlockPublicPolicy>true</BlockPublicPolicy><RestrictPublicBuckets>true</RestrictPublicBuckets>", "", "", "verified_private", 1},
 		{"public policy", "s3", "<BlockPublicAcls>true</BlockPublicAcls>", "<IsPublic>true</IsPublic>", "", "public_or_risky", 2},
 		{"public acl", "s3", "", "<IsPublic>false</IsPublic>", `<Grant><Grantee><URI>http://acs.amazonaws.com/groups/global/AllUsers</URI></Grantee><Permission>READ</Permission></Grant>`, "public_or_risky", 3},
 		{"authenticated group", "s3", "", "", `<Grant><Grantee><URI>http://acs.amazonaws.com/groups/global/AuthenticatedUsers</URI></Grantee><Permission>READ</Permission></Grant>`, "public_or_risky", 3},
@@ -72,6 +74,9 @@ func TestPrivacyInspection(t *testing.T) {
 			}
 			if report.GuidanceURL == "" {
 				t.Fatal("guidance missing")
+			}
+			if encoded, err := json.Marshal(report); err != nil || strings.Contains(string(encoded), "checked_at") {
+				t.Fatalf("uninspected report must omit checked_at: %s %v", encoded, err)
 			}
 		})
 	}

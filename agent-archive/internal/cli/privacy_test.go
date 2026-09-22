@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
-	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
-	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wangjohn/agent-skills/agent-archive/internal/archive"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/config"
+	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
 type privateTestStore struct {
@@ -42,13 +45,98 @@ func TestPrivacyEvidenceIsScopedAndExpires(t *testing.T) {
 		}
 	}
 	cfg.Storage.Bucket = "changed"
-	if p := currentBucketPrivacy(cfg, at); p.State != "not_verified" || p.Reason != "storage_configuration_changed" {
-		t.Fatalf("%+v", p)
+	changed := currentBucketPrivacy(cfg, at)
+	if changed.State != "not_verified" || changed.Reason != "storage_configuration_changed" {
+		t.Fatalf("%+v", changed)
+	}
+	if encoded, err := json.Marshal(changed); err != nil || strings.Contains(string(encoded), "checked_at") {
+		t.Fatalf("never-inspected evidence must omit checked_at: %s %v", encoded, err)
 	}
 	var out bytes.Buffer
-	printBucketPrivacy(&out, currentBucketPrivacy(cfg, at))
-	if !strings.Contains(out.String(), "https://") || !strings.Contains(out.String(), "not verified") {
+	printBucketPrivacy(&out, changed)
+	if !strings.Contains(out.String(), "https://") || !strings.Contains(out.String(), "not verified") || !strings.Contains(out.String(), "Checked: never") {
 		t.Fatal(out.String())
+	}
+}
+
+func TestSetupReviewReadsPrivacyWithEnvClock(t *testing.T) {
+	// Evidence collected two days ago on the frozen clock is fresh on that
+	// clock; only the wall clock would call it stale.
+	at := time.Now().UTC().Add(-48 * time.Hour)
+	cfg := config.Config{Storage: credentialsTestConfig(), RetentionDays: defaultRetentionDays}
+	cfg.BucketPrivacy = inspectBucketPrivacy(cfg, &privateTestStore{MemoryStore: storage.NewMemoryStore()}, at)
+	var out bytes.Buffer
+	p := newPrompter(strings.NewReader(""), &out)
+	p.now = func() time.Time { return at }
+	printReviewPrivacy(p, cfg)
+	if !strings.Contains(out.String(), "native public access blocked") || strings.Contains(out.String(), "inspection_stale") {
+		t.Fatal(out.String())
+	}
+}
+
+func TestCollectionRefreshesBucketPrivacyEvidence(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	at := time.Now().UTC()
+	cfg := config.Config{MachineID: "machine", Storage: credentialsTestConfig(), Harnesses: []string{"codex"}, Archive: archive.Config{Enabled: true, Projects: []archive.ProjectActivation{{Root: project, Included: true, ActivatedAt: at.Add(-time.Hour)}}}}
+	remote := &privateTestStore{MemoryStore: storage.NewMemoryStore()}
+	stale := inspectBucketPrivacy(cfg, remote, at.Add(-bucketPrivacyRefreshAfter-time.Minute))
+	remote.calls = 0
+	cfg.BucketPrivacy = stale
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), at)
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return remote, nil }
+	if _, err := runOnePass(env, true); err != nil {
+		t.Fatal(err)
+	}
+	saved, _, err := config.Load(home)
+	if err != nil || remote.calls != 1 || saved.BucketPrivacy == nil || saved.BucketPrivacy.CheckedAt == nil || !saved.BucketPrivacy.CheckedAt.Equal(at) {
+		t.Fatalf("stale evidence not refreshed: calls %d, %+v, %v", remote.calls, saved.BucketPrivacy, err)
+	}
+	if view, err := readStatus(env); err != nil || view.Privacy != "verified_private" {
+		t.Fatalf("status after refresh: %+v %v", view, err)
+	}
+	if _, err := runOnePass(env, true); err != nil || remote.calls != 1 {
+		t.Fatalf("fresh evidence re-inspected: calls %d, %v", remote.calls, err)
+	}
+	if _, err := runOnePass(env, false); err != nil || remote.calls != 1 {
+		t.Fatalf("manual sync inspected: calls %d, %v", remote.calls, err)
+	}
+	// A paused install never opens storage, so stale evidence stays as it is.
+	env.Now = func() time.Time { return at.Add(bucketPrivacyStaleAfter + time.Hour) }
+	if _, err := config.SetPaused(home, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnePass(env, true); err != errPaused || remote.calls != 1 {
+		t.Fatalf("paused pass inspected: calls %d, %v", remote.calls, err)
+	}
+	if view, err := readStatus(env); err != nil || view.PrivacyEvidence.Reason != "inspection_stale" {
+		t.Fatalf("paused status: %+v %v", view.PrivacyEvidence, err)
+	}
+}
+
+func TestSetupToleratesBackgroundPrivacyRefresh(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	at := time.Now().UTC()
+	env := setupTestEnv(t, home, userHome, newFakeKeychain(), at)
+	remote := &privateTestStore{MemoryStore: storage.NewMemoryStore()}
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) { return remote, nil }
+	setupRun(t, env, s3SetupInput("synthetic", "us-east-1", "profile", true, false, false, project), 0)
+	// While the wizard is open, a collector tick refreshes the evidence on disk.
+	env.OpenStore = func(config.Config) (storage.ObjectStore, error) {
+		cfg, _, err := config.Load(home)
+		if err != nil {
+			return nil, err
+		}
+		cfg.BucketPrivacy = inspectBucketPrivacy(cfg, remote, at.Add(time.Hour))
+		cfg.BucketPrivacy.State, cfg.BucketPrivacy.Reason = "public_or_risky", "public_bucket_policy"
+		return remote, config.Save(home, cfg)
+	}
+	setupRun(t, env, "retention\n30\ny\n", 0)
+	cfg, _, err := config.Load(home)
+	if err != nil || cfg.RetentionDays != 30 || cfg.BucketPrivacy == nil || cfg.BucketPrivacy.State != "public_or_risky" || !cfg.BucketPrivacy.CheckedAt.Equal(at.Add(time.Hour)) {
+		t.Fatalf("background evidence lost: %+v %v", cfg.BucketPrivacy, err)
 	}
 }
 

@@ -11,14 +11,16 @@ import (
 // PrivacyReport describes native bucket public access controls, not access
 // through authorized applications, signed URLs, or downstream copies.
 // It contains only fixed diagnostic codes, never provider error strings.
+// CheckedAt is nil until an inspection has run, so never-inspected evidence
+// omits the field instead of serializing the zero time.
 type PrivacyReport struct {
-	State           string    `json:"state"`
-	Reason          string    `json:"reason"`
-	Scope           string    `json:"scope"`
-	CheckedAt       time.Time `json:"checked_at,omitempty"`
-	ConfigurationID string    `json:"configuration_id,omitempty"`
-	GuidanceURL     string    `json:"guidance_url"`
-	Checks          []string  `json:"checks,omitempty"`
+	State           string     `json:"state"`
+	Reason          string     `json:"reason"`
+	Scope           string     `json:"scope"`
+	CheckedAt       *time.Time `json:"checked_at,omitempty"`
+	ConfigurationID string     `json:"configuration_id,omitempty"`
+	GuidanceURL     string     `json:"guidance_url"`
+	Checks          []string   `json:"checks,omitempty"`
 }
 
 func UnknownPrivacy(provider string) PrivacyReport {

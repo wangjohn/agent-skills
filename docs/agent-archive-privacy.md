@@ -8,7 +8,7 @@ For R2, setup stores S3-compatible object credentials, not a Cloudflare manageme
 
 Inspection covers native bucket public access. It does not assess applications that proxy authorized reads, shared signed URLs, or copies of archived data.
 
-The result includes fixed diagnostic codes, scope, check time, and a storage-configuration fingerprint. It is saved only with confirmed setup. Status reads the local result, never a remote API. After 24 hours, a clock rollback, or a storage configuration change, status reports privacy as unverified. Run setup to refresh the evidence. Provider errors and credentials are not included in the report.
+The result includes fixed diagnostic codes, scope, check time, and a storage-configuration fingerprint. Setup records it in the resumable setup draft as soon as the storage connection succeeds and commits it to the active configuration only when setup is confirmed; resuming a draft inspects again. Status reads the local result, never a remote API. After 24 hours, a clock rollback, or a storage configuration change, status reports privacy as unverified. The scheduled background collector refreshes the evidence with the same read-only inspection whenever the saved result is missing, is for another storage configuration, or is more than 12 hours old, so an active install stays verified without rerunning setup; a paused install is never inspected, and running setup also refreshes it. Provider errors and credentials are not included in the report.
 
 References used for the implementation:
 

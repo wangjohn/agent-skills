@@ -30,7 +30,8 @@ type S3Store struct {
 // S3StoreOptions configures a store. Client must be constructed with the
 // desired credential provider; this package never reads credentials itself.
 type S3StoreOptions struct {
-	// Provider is s3 or r2; empty is unknown for custom endpoints.
+	// Provider is s3 or r2 (compared case- and space-insensitively); empty is
+	// unknown for custom endpoints.
 	Provider     string
 	Client       *s3.Client
 	Bucket       string
@@ -62,7 +63,7 @@ func NewS3Store(options S3StoreOptions) (*S3Store, error) {
 	if maxGetBytes <= 0 {
 		maxGetBytes = 64 << 20
 	}
-	return &S3Store{provider: options.Provider, client: options.Client, bucket: options.Bucket, prefix: strings.Trim(options.Prefix, "/"), maxGetBytes: maxGetBytes}, nil
+	return &S3Store{provider: strings.ToLower(strings.TrimSpace(options.Provider)), client: options.Client, bucket: options.Bucket, prefix: strings.Trim(options.Prefix, "/"), maxGetBytes: maxGetBytes}, nil
 }
 
 // NewClient constructs an S3 client for AWS or an S3-compatible endpoint.

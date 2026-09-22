@@ -15,6 +15,17 @@ type privacyInspector interface {
 	InspectPrivacy(context.Context) storage.PrivacyReport
 }
 
+// Bucket privacy evidence: setup inspects the bucket once storage is
+// verified, and the background collector re-inspects once the saved report is
+// missing, for another storage configuration, or older than
+// bucketPrivacyRefreshAfter. Status calls a report stale after
+// bucketPrivacyStaleAfter; the refresh interval is shorter so a healthy,
+// unpaused install is never reported stale between ticks.
+const (
+	bucketPrivacyRefreshAfter = 12 * time.Hour
+	bucketPrivacyStaleAfter   = 24 * time.Hour
+)
+
 func privacyConfigurationID(cfg config.Config) string {
 	data, _ := json.Marshal(cfg.Storage)
 	return storage.SHA256Hex(data)
@@ -26,9 +37,26 @@ func inspectBucketPrivacy(cfg config.Config, store storage.ObjectStore, at time.
 		defer cancel()
 		report = inspector.InspectPrivacy(ctx)
 	}
-	report.CheckedAt = at.UTC()
+	checked := at.UTC()
+	report.CheckedAt = &checked
 	report.ConfigurationID = privacyConfigurationID(cfg)
 	return &report
+}
+
+// privacyEvidenceAge reports how old cfg's saved evidence is at the given
+// time, and false when there is none for the current storage configuration
+// or its check time is unusable (missing or in the future after a clock
+// rollback).
+func privacyEvidenceAge(cfg config.Config, at time.Time) (time.Duration, bool) {
+	report := cfg.BucketPrivacy
+	if report == nil || report.ConfigurationID != privacyConfigurationID(cfg) || report.CheckedAt == nil || at.Before(*report.CheckedAt) {
+		return 0, false
+	}
+	return at.Sub(*report.CheckedAt), true
+}
+func bucketPrivacyNeedsRefresh(cfg config.Config, at time.Time) bool {
+	age, ok := privacyEvidenceAge(cfg, at)
+	return !ok || age > bucketPrivacyRefreshAfter
 }
 func currentBucketPrivacy(cfg config.Config, at time.Time) storage.PrivacyReport {
 	report := storage.UnknownPrivacy(cfg.Storage.Provider)
@@ -39,7 +67,7 @@ func currentBucketPrivacy(cfg config.Config, at time.Time) storage.PrivacyReport
 	if report.ConfigurationID != privacyConfigurationID(cfg) {
 		report = storage.UnknownPrivacy(cfg.Storage.Provider)
 		report.Reason = "storage_configuration_changed"
-	} else if report.CheckedAt.IsZero() || at.Before(report.CheckedAt) || at.Sub(report.CheckedAt) > 24*time.Hour {
+	} else if age, ok := privacyEvidenceAge(cfg, at); !ok || age > bucketPrivacyStaleAfter {
 		report.State = "not_verified"
 		report.Reason = "inspection_stale"
 	}
@@ -54,5 +82,9 @@ func printBucketPrivacy(out io.Writer, report storage.PrivacyReport) {
 	default:
 		fmt.Fprintln(out, "Bucket privacy not verified.")
 	}
-	fmt.Fprintf(out, "  Checked: %s; %s.\n  Review: %s\n", formatTimeOrNever(report.CheckedAt), report.Reason, report.GuidanceURL)
+	checked := "never"
+	if report.CheckedAt != nil {
+		checked = formatTimeOrNever(*report.CheckedAt)
+	}
+	fmt.Fprintf(out, "  Checked: %s; %s.\n  Review: %s\n", checked, report.Reason, report.GuidanceURL)
 }

@@ -125,6 +125,16 @@ func runOnePass(env Env, quietOnBusy bool) (collector.Result, error) {
 				return collector.Result{}, probeErr
 			}
 		}
+		// Privacy evidence is persisted in config.json exactly as setup saves
+		// it, so status and setup review read one source. The config was
+		// re-read under the lock above, so the save cannot lose another
+		// writer's update.
+		if bucketPrivacyNeedsRefresh(cfg, env.now()) {
+			cfg.BucketPrivacy = inspectBucketPrivacy(cfg, objectStore, env.now())
+			if err := config.Save(home, cfg); err != nil {
+				return collector.Result{}, fmt.Errorf("save bucket privacy evidence: %w", err)
+			}
+		}
 	}
 
 	result, err := collector.Run(context.Background(), localStore, objectStore, collector.Options{
