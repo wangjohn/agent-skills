@@ -13,13 +13,44 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
+// relativeKeyStore rejects absolute keys on every operation, mirroring the
+// S3 store's prefix composition, so a probe that passes a pre-prefixed key
+// fails the same way it would against a configured bucket.
 type relativeKeyStore struct{ *storage.MemoryStore }
 
 func (s relativeKeyStore) Put(ctx context.Context, key string, data []byte) error {
-	if _, err := storage.Prefix("configured-prefix", key); err != nil {
+	if err := requireRelativeKey(key); err != nil {
 		return err
 	}
 	return s.MemoryStore.Put(ctx, key, data)
+}
+
+func (s relativeKeyStore) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := requireRelativeKey(key); err != nil {
+		return nil, err
+	}
+	return s.MemoryStore.Get(ctx, key)
+}
+
+func (s relativeKeyStore) List(ctx context.Context, prefix string) ([]storage.Object, error) {
+	if prefix != "" {
+		if err := requireRelativeKey(prefix); err != nil {
+			return nil, err
+		}
+	}
+	return s.MemoryStore.List(ctx, prefix)
+}
+
+func (s relativeKeyStore) Delete(ctx context.Context, key string) error {
+	if err := requireRelativeKey(key); err != nil {
+		return err
+	}
+	return s.MemoryStore.Delete(ctx, key)
+}
+
+func requireRelativeKey(key string) error {
+	_, err := storage.Prefix("configured-prefix", key)
+	return err
 }
 
 func TestScheduledProbeContinuesToPublication(t *testing.T) {
