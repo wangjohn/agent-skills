@@ -83,10 +83,11 @@ func (s *LocalStore) RemoveSuperseded(archiveSessionID, key string) error {
 }
 
 // ForgetSession removes every local record of a session: its registration,
-// published-bundle cache, superseded-source ledger, and native-session
-// index entry. A caller uses this only after successfully deleting that
-// session's metadata and every source object from storage (whole-session
-// retention); it never touches storage itself.
+// request, request lock, published-bundle cache, pending publication and
+// scan markers, superseded-source ledger, and native-session index entry. A
+// caller uses this only after successfully deleting that session's metadata
+// and every source object from storage (whole-session retention); it never
+// touches storage itself.
 func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
@@ -97,6 +98,7 @@ func (s *LocalStore) ForgetSession(archiveSessionID, nativeSessionID string) err
 		s.publishedPath(archiveSessionID),
 		s.pendingPath(archiveSessionID),
 		filepath.Join(s.home, "pending-scans", archiveSessionID+".json"),
+		filepath.Join(s.home, "request-locks", archiveSessionID+".lock"),
 		s.supersededPath(archiveSessionID),
 	}
 	if nativeSessionID != "" {
