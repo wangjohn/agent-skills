@@ -197,9 +197,11 @@ made it eligible, or used that exact version during an earlier turn.
 Changed inventories and instruction versions remain in session history. Empty
 and removed directories produce explicit observations. Unchanged observations
 are not appended again. Skill edits alone do not refresh inactive sessions.
-Each observation pass reads at most 4 MiB of instruction content; oversized,
-truncated, nested, and uninspected plugin content is marked as a coverage gap.
-Hooks do not perform this filesystem scan.
+Within one collector pass, user-scope skill directories are read once per app
+and each project's skill directory once, with at most 4 MiB of instruction
+content per such read. Oversized, truncated, nested, unreadable, and
+uninspected plugin content is marked as a coverage gap rather than failing the
+session. Hooks do not perform this filesystem scan.
 
 ## Build from source
 
