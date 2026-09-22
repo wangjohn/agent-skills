@@ -56,7 +56,7 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 	if len(records) == 0 && len(nativeText) == 0 {
 		return SourceBundle{}, errors.New("filtered transcript has no retained evidence")
 	}
-	harness := observedHarness(reg.Harness, records)
+	harness := observedHarness(reg.Harness, transcript.Format, records)
 	filteredSupplemental, gaps, err := FilterSupplementalEvidence(supplemental)
 	if err != nil {
 		return SourceBundle{}, err
@@ -76,8 +76,18 @@ func NewSourceBundle(reg SessionRegistration, adapter Adapter, transcript Filter
 	}, nil
 }
 
-func observedHarness(base Harness, records []map[string]any) Harness {
+// observedHarness attributes the capture to the harness version the
+// transcript itself reports: Codex writes cli_version on session_meta and
+// Claude Code stamps every JSONL record with a top-level version. Cursor's
+// version arrives through its hook payload (cursor_version), not here.
+func observedHarness(base Harness, format string, records []map[string]any) Harness {
 	for _, record := range records {
+		if format == "claude-jsonl" {
+			if version := strings.TrimSpace(firstString(record, "version")); version != "" {
+				base.Version = version
+			}
+			continue
+		}
 		if firstString(record, "type") != "session_meta" {
 			continue
 		}

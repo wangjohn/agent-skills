@@ -10,13 +10,25 @@ import (
 	"github.com/wangjohn/agent-skills/agent-archive/internal/storage"
 )
 
-func showSetupReview(p *prompter, cfg config.Config, reconfiguring bool) {
+func showSetupReview(p *prompter, cfg config.Config, reconfiguring bool, discoveries map[string]applicationDiscovery) {
 	title := "Ready to start"
 	if reconfiguring {
 		title = "Review your changes"
 	}
 	fmt.Fprintln(p.out, "\n3 of 3 — "+title+"\n")
 	fmt.Fprintf(p.out, "Apps       %s\n", friendlyApps(cfg.Harnesses))
+	for _, app := range cfg.Harnesses {
+		profile := captureCapabilityProfile(app)
+		discovery := discoveries[app]
+		version := discovery.Version
+		if version == "" {
+			version = discovery.VersionState
+		}
+		if version == "" {
+			version = "unknown"
+		}
+		fmt.Fprintf(p.out, "  %s: installed version %s (capture unverified); fresh-start evidence %s; transcript %s\n", appName(app), version, profile.FreshStart.State, profile.Transcript.State)
+	}
 	for _, project := range cfg.Archive.Projects {
 		if project.Included {
 			fmt.Fprintf(p.out, "Project    %s\n", project.Root)
