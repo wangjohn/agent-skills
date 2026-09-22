@@ -43,7 +43,7 @@ func materializeSubagentCandidate(local *LocalStore, candidate SubagentCandidate
 	if err != nil {
 		return rejectSubagentCandidate(local, candidate, "subagent_format_unavailable")
 	}
-	filtered, err := filterTranscript(adapter, reg)
+	filtered, err := filterTranscript(adapter, reg, opts.maxTranscriptBytes())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("subagent transcript is not available yet: %w", err)

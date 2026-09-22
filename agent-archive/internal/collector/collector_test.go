@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -447,6 +448,108 @@ func TestStopRequestFlushesRateLimitAndPreservesEarlierHookEvidence(t *testing.T
 	}
 }
 
+// A session that is being used generates a lifecycle event on every prompt.
+// That evidence must ride the normal debounce, not force an upload each time.
+func TestPromptEvidenceRidesTheUploadIntervalAndIsPublished(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := local.SaveEvidence("session-1", "sessionstart", t0, lifecycleEvidence(t0, "SessionStart")); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil || len(result.Published) != 1 {
+		t.Fatalf("first publication is never rate limited: result=%#v err=%v", result, err)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("deferred request was not acknowledged by its publication: %#v", requests)
+	}
+	const prompts = 5
+	var at time.Time
+	for i := 1; i <= prompts; i++ {
+		at = t0.Add(time.Duration(i) * 10 * time.Second)
+		if err := local.SaveEvidence("session-1", "userpromptsubmit", at, lifecycleEvidence(at, "UserPromptSubmit")); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return at }, MinUploadInterval: 3 * time.Minute})
+		if err != nil || len(result.Published) != 0 || len(result.Skipped) != 1 {
+			t.Fatalf("prompt %d forced an upload inside the interval: result=%#v err=%v", i, result, err)
+		}
+	}
+	if objects, err := store.List(context.Background(), ""); err != nil || len(objects) != 2 {
+		t.Fatalf("prompts uploaded new objects: %v err=%v", objects, err)
+	}
+	requests, err := local.LoadRequests()
+	if err != nil || len(requests) != 1 || !requests[0].Deferred || len(requests[0].HookEvidence) != prompts || !requests[0].RequestedAt.Equal(t0.Add(10*time.Second)) {
+		t.Fatalf("prompt evidence must accumulate on one deferred request: %#v err=%v", requests, err)
+	}
+	tPublish := t0.Add(4 * time.Minute)
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return tPublish }, MinUploadInterval: 3 * time.Minute})
+	if err != nil || len(result.Published) != 1 {
+		t.Fatalf("deferred evidence was never published: result=%#v err=%v", result, err)
+	}
+	bundle := fetchBundle(t, store, fetchMetadata(t, store, "codex", "session-1"))
+	if len(bundle.SupplementalEvidence) != prompts+1 {
+		t.Fatalf("published bundle lost prompt evidence: %#v", bundle.SupplementalEvidence)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("deferred request outlived its publication: %#v", requests)
+	}
+}
+
+// A stop after prompt evidence is still the debounce flush it always was, and
+// the prompt evidence it follows is published with it.
+func TestStopAfterPromptEvidenceFlushesImmediately(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil {
+		t.Fatal(err)
+	}
+	t1 := t0.Add(10 * time.Second)
+	if err := local.SaveEvidence("session-1", "userpromptsubmit", t1, lifecycleEvidence(t1, "UserPromptSubmit")); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t1 }, MinUploadInterval: 3 * time.Minute}); err != nil || len(result.Published) != 0 {
+		t.Fatalf("prompt evidence bypassed the interval: result=%#v err=%v", result, err)
+	}
+	t2 := t1.Add(10 * time.Second)
+	if err := local.SaveRequest("session-1", "stop", t2, lifecycleEvidence(t2, "Stop")); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := local.LoadRequests()
+	if err != nil || len(requests) != 1 || requests[0].Deferred || !requests[0].RequestedAt.Equal(t2) || len(requests[0].Reasons) != 2 {
+		t.Fatalf("stop did not make the pending request urgent: %#v err=%v", requests, err)
+	}
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t2 }, MinUploadInterval: 3 * time.Minute})
+	if err != nil || len(result.Published) != 1 {
+		t.Fatalf("stop request did not flush debounce: result=%#v err=%v", result, err)
+	}
+	bundle := fetchBundle(t, store, fetchMetadata(t, store, "codex", "session-1"))
+	if len(bundle.SupplementalEvidence) != 2 {
+		t.Fatalf("prompt evidence was lost by the flush: %#v", bundle.SupplementalEvidence)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("request outlived its publication: %#v", requests)
+	}
+}
+
+func lifecycleEvidence(at time.Time, name string) archive.SupplementalEvidence {
+	return archive.SupplementalEvidence{
+		Kind: archive.EvidenceKindLifecycleHook, ObservedAt: at,
+		Provenance: "hook:codex:" + strings.ToLower(name), Payload: map[string]any{"event_name": name},
+	}
+}
+
 func TestRunPreservesLastGoodSnapshotAcrossTranscriptRewrite(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
@@ -469,16 +572,107 @@ func TestRunPreservesLastGoodSnapshotAcrossTranscriptRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Errors) != 1 {
-		t.Fatalf("rewrite should remain an explicit capture failure: %#v", result)
+	if len(result.Errors) != 0 || len(result.Published) != 0 {
+		t.Fatalf("rewrite should be a recorded gap, not a failure: %#v", result)
 	}
 	after := fetchMetadata(t, store, "codex", "session-1")
 	if after.SourceBundle.SHA256 != before.SourceBundle.SHA256 {
 		t.Fatalf("rewrite replaced richer last-good source: before=%s after=%s", before.SourceBundle.SHA256, after.SourceBundle.SHA256)
 	}
 	requests, err := local.LoadRequests()
-	if err != nil || len(requests) != 1 {
-		t.Fatalf("rewrite request should remain pending: %#v err=%v", requests, err)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("blocked request should be acknowledged: %#v err=%v", requests, err)
+	}
+	if scanPending, err := local.ScanPending("session-1"); err != nil || scanPending {
+		t.Fatalf("blocked session left scan pending: %v err=%v", scanPending, err)
+	}
+	reason, blocked, err := local.LoadBlocked("session-1")
+	if err != nil || !blocked || reason != BlockedReasonTranscriptRewritten {
+		t.Fatalf("blocked=%v reason=%q err=%v", blocked, reason, err)
+	}
+	if _, at, found, err := local.LoadLastPublished("session-1"); err != nil || !found || !at.Equal(t0) {
+		t.Fatalf("last published snapshot was not retained: found=%v at=%s err=%v", found, at, err)
+	}
+
+	// Nothing changed: the next pass is a no-op, not a repeated failure.
+	t2 := t1.Add(10 * time.Minute)
+	if err := local.SaveRequest("session-1", "end", t2); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t2 }})
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 0 {
+		t.Fatalf("unchanged blocked session was reprocessed: result=%#v err=%v", result, err)
+	}
+	status, err := local.LoadStatus()
+	if err != nil || status.LastError != "" || status.PendingCount != 0 {
+		t.Fatalf("blocked session reported as pending or failed: %+v err=%v", status, err)
+	}
+	if requests, err := local.LoadRequests(); err != nil || len(requests) != 0 {
+		t.Fatalf("request on unchanged blocked session not acknowledged: %#v err=%v", requests, err)
+	}
+	if scanPending, err := local.ScanPending("session-1"); err != nil || scanPending {
+		t.Fatalf("scan left pending: %v err=%v", scanPending, err)
+	}
+	if fetchMetadata(t, store, "codex", "session-1").SourceBundle.SHA256 != before.SourceBundle.SHA256 {
+		t.Fatal("last-good source changed on a no-op pass")
+	}
+
+	// Once the transcript again extends the retained snapshot, capture resumes.
+	writeTranscript(t, dir, "codex.jsonl", codexTranscript+"\n"+`{"type":"response_item","id":"m2","payload":{"type":"message","role":"assistant","content":"more"}}`)
+	t3 := t2.Add(10 * time.Minute)
+	result, err = Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t3 }})
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 1 {
+		t.Fatalf("restored transcript was not republished: result=%#v err=%v", result, err)
+	}
+	if _, blocked, err := local.LoadBlocked("session-1"); err != nil || blocked {
+		t.Fatalf("session still blocked after republish: blocked=%v err=%v", blocked, err)
+	}
+}
+
+func TestRewriteGuardYieldsToNewFilterOrAdapterVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	store := newTestStore(t)
+	if err := store.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	cloud := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if _, err := Run(context.Background(), store, cloud, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil {
+		t.Fatal(err)
+	}
+	before := fetchMetadata(t, cloud, "codex", "session-1")
+	// Simulate a cache written by an earlier release whose filter produced
+	// different records: the new release must republish, not block forever.
+	var state publishedState
+	if err := local.Read(store.publishedPath("session-1"), &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Bundle.Capture.FilterVersion = "0"
+	state.LastPublished.Bundle.Capture.FilterVersion = "0"
+	if err := local.Write(store.publishedPath("session-1"), state); err != nil {
+		t.Fatal(err)
+	}
+	writeTranscript(t, dir, "codex.jsonl", `{"type":"turn_context","model":"gpt-test"}`)
+	t1 := t0.Add(10 * time.Minute)
+	result, err := Run(context.Background(), store, cloud, Options{MachineID: "m", Now: func() time.Time { return t1 }})
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 1 {
+		t.Fatalf("filter version change should republish: result=%#v err=%v", result, err)
+	}
+	if fetchMetadata(t, cloud, "codex", "session-1").SourceBundle.SHA256 == before.SourceBundle.SHA256 {
+		t.Fatal("republish did not replace the old-filter source")
+	}
+
+	previous := archive.SourceBundle{NativeRecords: []map[string]any{{"a": 1}, {"b": 2}}}
+	previous.Capture.AdapterVersion = "1"
+	candidate := archive.SourceBundle{NativeRecords: []map[string]any{{"a": 1}}}
+	candidate.Capture.AdapterVersion = "1"
+	if nativeEvidenceExtends(previous, candidate) {
+		t.Fatal("same-version truncation must still be caught")
+	}
+	candidate.Capture.AdapterVersion = "2"
+	if !nativeEvidenceExtends(previous, candidate) {
+		t.Fatal("adapter version change must not read as a rewrite")
 	}
 }
 
@@ -549,7 +743,7 @@ func TestRunRejectsTranscriptAboveCollectionLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Truncate(maxTranscriptBytes + 1); err != nil {
+	if err := file.Truncate(DefaultMaxTranscriptBytes + 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -564,12 +758,150 @@ func TestRunRejectsTranscriptAboveCollectionLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Errors) != 1 {
-		t.Fatalf("oversized transcript was not rejected: %#v", result)
+	if len(result.Errors) != 0 || len(result.Published) != 0 {
+		t.Fatalf("oversized transcript should be a recorded gap, not a failure: %#v", result)
+	}
+	if reason, blocked, err := local.LoadBlocked("session-1"); err != nil || !blocked || reason != BlockedReasonTranscriptTooLarge {
+		t.Fatalf("blocked=%v reason=%q err=%v", blocked, reason, err)
 	}
 	objects, _ := store.List(context.Background(), "sessions")
 	if len(objects) != 0 {
 		t.Fatalf("oversized transcript uploaded objects: %#v", objects)
+	}
+}
+
+func TestRunOversizeTranscriptBlocksOnceAndRetainsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	limit := int64(len(codexTranscript) + 16)
+	options := Options{MachineID: "m", Now: func() time.Time { return t0 }, MaxTranscriptBytes: limit}
+	if _, err := Run(context.Background(), local, store, options); err != nil {
+		t.Fatal(err)
+	}
+	before := fetchMetadata(t, store, "codex", "session-1")
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("\n" + `{"type":"response_item","id":"m2","payload":{"type":"message","role":"assistant","content":"this record pushes the file over the limit"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t1 := t0.Add(10 * time.Minute)
+	if err := local.SaveRequest("session-1", "stop", t1); err != nil {
+		t.Fatal(err)
+	}
+	options.Now = func() time.Time { return t1 }
+	result, err := Run(context.Background(), local, store, options)
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 0 {
+		t.Fatalf("oversize should be a recorded gap: result=%#v err=%v", result, err)
+	}
+	if reason, blocked, err := local.LoadBlocked("session-1"); err != nil || !blocked || reason != BlockedReasonTranscriptTooLarge {
+		t.Fatalf("blocked=%v reason=%q err=%v", blocked, reason, err)
+	}
+	if requests, err := local.LoadRequests(); err != nil || len(requests) != 0 {
+		t.Fatalf("blocked request should be acknowledged: %#v err=%v", requests, err)
+	}
+	if scanPending, err := local.ScanPending("session-1"); err != nil || scanPending {
+		t.Fatalf("blocked session left scan pending: %v err=%v", scanPending, err)
+	}
+	if _, at, found, err := local.LoadLastPublished("session-1"); err != nil || !found || !at.Equal(t0) {
+		t.Fatalf("last published snapshot was not retained: found=%v at=%s err=%v", found, at, err)
+	}
+	if fetchMetadata(t, store, "codex", "session-1").SourceBundle.SHA256 != before.SourceBundle.SHA256 {
+		t.Fatal("oversize pass changed the published source")
+	}
+
+	// Still oversize, nothing else changed: no work, no error, not pending.
+	stat, err := os.Stat(local.publishedPath("session-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2 := t1.Add(10 * time.Minute)
+	options.Now = func() time.Time { return t2 }
+	result, err = Run(context.Background(), local, store, options)
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 0 {
+		t.Fatalf("unchanged oversize session was reprocessed: result=%#v err=%v", result, err)
+	}
+	if again, err := os.Stat(local.publishedPath("session-1")); err != nil || !again.ModTime().Equal(stat.ModTime()) || again.Size() != stat.Size() {
+		t.Fatalf("published cache rewritten on a no-op pass: err=%v", err)
+	}
+	status, err := local.LoadStatus()
+	if err != nil || status.LastError != "" || status.PendingCount != 0 {
+		t.Fatalf("blocked session reported as pending or failed: %+v err=%v", status, err)
+	}
+
+	// Raising the limit resumes capture against the retained snapshot.
+	options.MaxTranscriptBytes = 0
+	t3 := t2.Add(10 * time.Minute)
+	options.Now = func() time.Time { return t3 }
+	result, err = Run(context.Background(), local, store, options)
+	if err != nil || len(result.Errors) != 0 || len(result.Published) != 1 {
+		t.Fatalf("transcript within limit was not republished: result=%#v err=%v", result, err)
+	}
+	if _, blocked, err := local.LoadBlocked("session-1"); err != nil || blocked {
+		t.Fatalf("session still blocked after republish: blocked=%v err=%v", blocked, err)
+	}
+}
+
+func TestForgetSessionRemovesRequestLock(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := store.SaveRequest("session-1", "stop", now); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(store.home, "request-locks", "session-1.lock")
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("request lock was not created: %v", err)
+	}
+	if err := store.ForgetSession("session-1", "native-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("request lock leaked after ForgetSession: %v", err)
+	}
+	if err := store.ForgetSession("session-1", "native-1"); err != nil {
+		t.Fatalf("forgetting twice must be a no-op: %v", err)
+	}
+}
+
+func TestForgetSessionRemovesVerificationRecordAndEmptyDirectory(t *testing.T) {
+	store := newTestStore(t)
+	dir := store.SessionDir("session-1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "verification.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ForgetSession("session-1", "native-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("per-session directory leaked after ForgetSession: %v", err)
+	}
+	// Anything unexpected in the directory is preserved, not deleted blindly.
+	other := store.SessionDir("session-2")
+	if err := os.MkdirAll(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "notes.txt"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ForgetSession("session-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "notes.txt")); err != nil {
+		t.Fatalf("unrelated file removed: %v", err)
 	}
 }
 

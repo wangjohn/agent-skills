@@ -30,6 +30,15 @@ const archiveSessionsPrefix = "sessions"
 // prints, so a first-time user gets one consistent answer.
 const notSetUpMessage = "Not set up. Run `agent-archive setup` to get started."
 
+// eligibleNoUseUnavailableMessage is what `list --skill-usage eligible_no_use`
+// prints, with exit 0 and no rows. No parser version records both a complete
+// eligible-skill set and complete use observation, so no sidecar carries the
+// observed_none detection the query compares against and it can match nothing.
+// help.go and docs/install.md state the same thing in the same words.
+const eligibleNoUseUnavailableMessage = "--skill-usage eligible_no_use cannot return sessions yet: no parser version\n" +
+	"records both a complete eligible-skill set and complete use observation, so\n" +
+	"non-use is never proven. The value stays accepted for forward compatibility."
+
 // openReadOnlyStore loads configuration and opens the configured object
 // store the same way a collector pass does (env.openStore), but without the
 // machine lock or the pause check: `list` and `show` only read remote
@@ -79,18 +88,31 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintln(stderr, "agent-archive: list: --skill-sha256 must be exactly 64 lowercase hexadecimal characters")
 		return 2
 	}
-	if *skillUsage != string(reader.SkillUsageUsed) && *skill == "" && *skillSHA256 == "" {
-		fmt.Fprintln(stderr, "agent-archive: list: --skill-usage requires --skill or --skill-sha256")
-		return 2
-	}
-	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, SkillSHA256: *skillSHA256, RequireCompleteCoverage: *complete}
-	switch usage := reader.SkillUsage(*skillUsage); usage {
+	// The value is checked before the --skill/--skill-sha256 requirement so
+	// that a misspelled value is reported as the misspelling it is, rather
+	// than as a missing companion flag.
+	usage := reader.SkillUsage(*skillUsage)
+	switch usage {
 	case reader.SkillUsageUsed, reader.SkillUsageAvailable, reader.SkillUsageEligibleNoUse:
-		filter.SkillUsage = usage
 	default:
 		fmt.Fprintf(stderr, "agent-archive: list: --skill-usage must be used, available, or eligible_no_use, not %q\n", *skillUsage)
 		return 2
 	}
+	if usage != reader.SkillUsageUsed && *skill == "" && *skillSHA256 == "" {
+		fmt.Fprintln(stderr, "agent-archive: list: --skill-usage requires --skill or --skill-sha256")
+		return 2
+	}
+	// No parser version records both a complete eligible-skill set and
+	// complete use observation, so nothing in the bucket can carry the
+	// observed_none detection this query compares against. Say so instead
+	// of scanning metadata and reporting an empty result that reads like an
+	// answer. The value stays accepted so scripts keep working once a
+	// parser version emits that evidence.
+	if usage == reader.SkillUsageEligibleNoUse {
+		fmt.Fprintln(stdout, eligibleNoUseUnavailableMessage)
+		return 0
+	}
+	filter := reader.Filter{Harness: *harness, Model: *model, Skill: *skill, SkillSHA256: *skillSHA256, RequireCompleteCoverage: *complete, SkillUsage: usage}
 	if *since != "" {
 		from, err := parseSince(*since, env.now())
 		if err != nil {
@@ -116,9 +138,6 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No archived sessions match.")
-		if filter.SkillUsage == reader.SkillUsageEligibleNoUse {
-			fmt.Fprintln(stdout, "Sessions without complete eligibility and use-observation evidence are excluded; an empty result does not prove no eligible sessions exist.")
-		}
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -131,9 +150,6 @@ func runListCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%d session(s).\n", len(sessions))
-	if filter.SkillUsage == reader.SkillUsageEligibleNoUse {
-		fmt.Fprintln(stdout, "Sessions without complete eligibility and use-observation evidence are excluded.")
-	}
 	return 0
 }
 

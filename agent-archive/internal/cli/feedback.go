@@ -105,9 +105,7 @@ func runFeedbackCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintln(stderr, "agent-archive: feedback: input contained no retainable text")
 		return 1
 	}
-	if len(gaps) > 0 {
-		filtered[0].Payload["redacted"] = true
-	}
+	archive.AnnotateSupplementalGaps(filtered[0].Payload, gaps)
 	if err := store.SaveRequest(sessionID, "explicit_feedback", now, filtered[0]); err != nil {
 		fmt.Fprintf(stderr, "agent-archive: feedback: save: %v\n", err)
 		return 1

@@ -151,11 +151,31 @@ func TestReadMetadataAndFindMetadataKeys(t *testing.T) {
 	}
 }
 
-func TestLegacyObservedNoneDoesNotProveUnusedSkill(t *testing.T) {
-	for _, version := range []string{"", "0.1.0", "0.2.0", "0.3.0"} {
+// Only a parser version that parses as major.minor.patch and is at least
+// 0.4.0 may support a no-use comparison. collector.Options.ParserVersion is a
+// real override, so a pre-0.4.0 build could have written observed_none under
+// an arbitrary version string: unparsable versions must be excluded, not
+// trusted because they are absent from a list of known-old releases.
+func TestOnlyParsableParserVersionsAtOrAbove040ProveUnusedSkill(t *testing.T) {
+	for version, want := range map[string]bool{
+		"":        false,
+		"0.1.0":   false,
+		"0.2.0":   false,
+		"0.3.0":   false,
+		"0.4.0":   true,
+		"0.10.0":  true,
+		"1.0.0":   true,
+		"custom":  false,
+		"0.4":     false,
+		"0.4.0.1": false,
+		"v0.4.0":  false,
+		"0.4.0-a": false,
+		"0.04.0":  false,
+		" 0.4.0":  false,
+	} {
 		m := archive.Metadata{Parser: archive.ParserInfo{Version: version}, SkillDetection: archive.SkillDetectionObservedNone, SkillsAvailable: []archive.SkillSnapshot{{Name: "review", Coverage: archive.SkillCoverageEligible}}}
-		if matches(m, Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}) {
-			t.Fatalf("trusted legacy inference from %q", version)
+		if got := matches(m, Filter{Skill: "review", SkillUsage: SkillUsageEligibleNoUse}); got != want {
+			t.Fatalf("parser version %q: matched=%v want=%v", version, got, want)
 		}
 	}
 }

@@ -262,7 +262,7 @@ The following is illustrative. IDs, versions, and hashes are shortened examples.
       "attributes": {
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-6-astra",
-        "gen_ai.request.reasoning.level": "high"
+        "agent_archive.request.reasoning_level": "high"
       },
       "source": "native_transcript",
       "response_model_status": "not_exposed",

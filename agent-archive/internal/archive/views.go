@@ -439,9 +439,9 @@ func deriveLifecycle(evidence []SupplementalEvidence) (MetadataState, TurnOutcom
 			if observed := documentedLifecycleOutcome(observation.event, observation.status, observation.provenance); observed != TurnOutcomeUnknown {
 				outcome = observed
 			}
-		case "subagentstop":
-			state, outcome = MetadataStateClosed, documentedLifecycleOutcome(observation.event, observation.status, observation.provenance)
 		}
+		// A subagent finishing says nothing about the parent session, which
+		// is still running: its state and outcome are left as observed.
 	}
 	return state, outcome
 }
