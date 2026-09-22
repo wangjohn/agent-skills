@@ -185,6 +185,12 @@ published release come from identical build flags. Building with plain
 `go build ./cmd/agent-archive` also works for quick local testing, but
 skips version embedding and produces an unsigned, non-optimized binary.
 
+A local build runs directly on the machine that built it. If you build on
+another machine and copy the binary over (for example via AirDrop or a
+browser download), macOS may attach a quarantine attribute and Gatekeeper
+will refuse to open the unsigned binary; right-click it in Finder and
+choose **Open** once, or run `xattr -d com.apple.quarantine` on it.
+
 ## Signing and notarization
 
 Release binaries are codesigned with a Developer ID Application
@@ -193,7 +199,9 @@ verify them without a manual approval step. This requires an Apple
 Developer Program membership and its associated credentials
 (a Developer ID Application certificate, an app-specific password, and a
 team ID) configured as repository secrets, plus the
-`APPLE_SIGNING_ENABLED` repository variable set to `true`. A tagged release
+`APPLE_SIGNING_ENABLED` repository variable set to `true`. The variable must
+be exactly the lowercase string `true`; any other value (including `True`,
+`TRUE`, `1`, or `yes`) is treated as disabled. A tagged release
 fails before building if the flag or any required signing secret is missing.
 Signing, signature verification, and accepted notarization are mandatory before
 publishing either architecture. Local `scripts/build-release.sh` builds remain

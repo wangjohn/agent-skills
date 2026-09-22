@@ -112,7 +112,7 @@ jobs:
             zip -j "$RUNNER_TEMP/notarize-${arch}.zip" "$binary"
             xcrun notarytool submit "$RUNNER_TEMP/notarize-${arch}.zip" \
               --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-              --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json > "$RUNNER_TEMP/notary-${arch}.json"
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary-${arch}.json"
             python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); sys.exit(0 if result.get("status") == "Accepted" else "Notarization was not accepted")' "$RUNNER_TEMP/notary-${arch}.json"
           done
 
