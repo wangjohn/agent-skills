@@ -123,13 +123,44 @@ type Request struct {
 	Reasons          []string                       `json:"reasons"`
 	RequestedAt      time.Time                      `json:"requested_at"`
 	HookEvidence     []archive.SupplementalEvidence `json:"hook_evidence,omitempty"`
+	// Deferred marks a request that only carries lifecycle activity evidence
+	// (a session start, a prompt submitted) and has not asked for a debounce
+	// flush: the collector folds it in on its normal MinUploadInterval
+	// schedule instead of uploading on every prompt. A stop, end, or response
+	// request for the same session clears it. Requests written before the
+	// field existed are urgent, as they always were.
+	Deferred bool `json:"deferred,omitempty"`
+}
+
+// urgent reports whether the request asks the collector to flush the upload
+// debounce now rather than wait for the next scheduled publication.
+func (r Request) urgent() bool {
+	return r.Token != "" && !r.Deferred
 }
 
 // SaveRequest merges a new hook event into any already-pending request for
 // the same session: reasons accumulate, evidence appends, and RequestedAt
 // advances to the latest event. This is the coalescing the spec asks for
-// when a stop and a session-end hook both fire for the same session.
+// when a stop and a session-end hook both fire for the same session. The
+// resulting request is urgent: the collector publishes it as soon as it is
+// scanned, bypassing MinUploadInterval.
 func (s *LocalStore) SaveRequest(archiveSessionID, reason string, requestedAt time.Time, evidence ...archive.SupplementalEvidence) error {
+	return s.saveRequest(archiveSessionID, reason, requestedAt, false, evidence...)
+}
+
+// SaveEvidence appends lifecycle evidence to the session's request without
+// asking for a flush. A request it creates is deferred; a request that is
+// already pending keeps its urgency and RequestedAt, so a stop that is
+// waiting to publish is neither delayed nor re-triggered by a later prompt.
+func (s *LocalStore) SaveEvidence(archiveSessionID, reason string, observedAt time.Time, evidence ...archive.SupplementalEvidence) error {
+	return s.saveRequest(archiveSessionID, reason, observedAt, true, evidence...)
+}
+
+// saveRequest always assigns a fresh token, even for deferred evidence: the
+// token is what CompleteRequest checks, so a hook that lands while a scan is
+// publishing the previous token keeps its evidence pending for the next
+// pass instead of being acknowledged away with it.
+func (s *LocalStore) saveRequest(archiveSessionID, reason string, requestedAt time.Time, deferred bool, evidence ...archive.SupplementalEvidence) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -145,11 +176,14 @@ func (s *LocalStore) SaveRequest(archiveSessionID, reason string, requestedAt ti
 	if err != nil {
 		return err
 	}
-	merged := Request{ArchiveSessionID: archiveSessionID, RequestedAt: requestedAt}
+	merged := Request{ArchiveSessionID: archiveSessionID, RequestedAt: requestedAt, Deferred: deferred}
 	if found {
 		merged = existing
-		if requestedAt.After(merged.RequestedAt) {
-			merged.RequestedAt = requestedAt
+		if !deferred {
+			merged.Deferred = false
+			if requestedAt.After(merged.RequestedAt) {
+				merged.RequestedAt = requestedAt
+			}
 		}
 	}
 	merged.Token, err = local.ID()

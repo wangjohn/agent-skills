@@ -107,7 +107,7 @@ func TestFeedbackRejectsSessionExcludedByCurrentSetup(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	requests, err := store.LoadRequests()
-	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Kind != archive.EvidenceKindLifecycleHook {
+	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Kind != archive.EvidenceKindLifecycleHook || !requests[0].Deferred {
 		t.Fatalf("requests=%#v err=%v", requests, err)
 	}
 }

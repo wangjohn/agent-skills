@@ -347,12 +347,16 @@ func applyHarnessObservation(target *archive.Harness, harness string, payload ma
 	}
 }
 
+// saveLifecycleEvidence records a start or prompt event as deferred evidence:
+// it is folded into the next scheduled publication rather than forcing an
+// upload on every prompt. Stop, end, and response events go through
+// handleSessionStop, whose request is the intended debounce flush.
 func saveLifecycleEvidence(store *collector.LocalStore, archiveID, harness, reason string, payload map[string]any, now time.Time) error {
 	evidence, err := filteredHookEvidence(archive.EvidenceKindLifecycleHook, harness, reason, payload, false, now)
 	if err != nil || evidence == nil {
 		return err
 	}
-	return store.SaveRequest(archiveID, reason, now, *evidence)
+	return store.SaveEvidence(archiveID, reason, now, *evidence)
 }
 
 func handleSessionStop(store *collector.LocalStore, harness, nativeSessionID, eventName string, payload map[string]any, now time.Time) error {

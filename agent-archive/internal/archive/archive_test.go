@@ -324,13 +324,19 @@ func TestLifecycleDerivationIsOrderedConservativeAndDeterministic(t *testing.T) 
 	if state != MetadataStateIdle || outcome != TurnOutcomeCompleted {
 		t.Fatalf("documented Cursor stop completion = %q/%q", state, outcome)
 	}
-	state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": "incomplete"})))
-	if state != MetadataStateClosed || outcome != TurnOutcomeUnknown {
-		t.Fatalf("unknown subagent status = %q/%q", state, outcome)
+	// A subagent finishing does not close, idle, or complete the parent
+	// session, whatever status it reports and from whichever provenance.
+	for _, status := range []string{"incomplete", "completed"} {
+		state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": status})))
+		if state != MetadataStateActive || outcome != TurnOutcomeUnknown {
+			t.Fatalf("subagent stop with status %q changed the parent session to %q/%q", status, state, outcome)
+		}
 	}
-	state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": "completed"})))
-	if state != MetadataStateClosed || outcome != TurnOutcomeCompleted {
-		t.Fatalf("documented subagent completion = %q/%q", state, outcome)
+	cursorSubagent := event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": "completed"})
+	cursorSubagent.Provenance = "hook:cursor:subagentstop"
+	state, outcome = deriveLifecycle(append(evidence, cursorStop, cursorSubagent))
+	if state != MetadataStateIdle || outcome != TurnOutcomeCompleted {
+		t.Fatalf("subagent stop after a documented stop must leave it as observed, got %q/%q", state, outcome)
 	}
 	for name, want := range map[string]TurnOutcome{"Interrupt": TurnOutcomeInterrupted, "StopFailure": TurnOutcomeError} {
 		state, outcome = deriveLifecycle(append(evidence, event(now.Add(5*time.Minute), name, nil)))
