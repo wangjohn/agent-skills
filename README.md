@@ -48,11 +48,8 @@ Or tell an agent to follow the `create-skill` skill in this repo.
 
 ```bash
 python3 scripts/validate.py
-python3 -m unittest discover -s tests -v
 ```
 
 ## Related
 
 [agent-archive](https://github.com/wangjohn/agent-archive) is a macOS CLI that keeps a private, local-first archive of your Codex, Claude Code, and Cursor sessions in a bucket you own. It used to live in this repo and now has its own.
-
-The earlier [Python skill-run recorder](docs/skill-runs.md) is retained as a legacy prototype with its own data format and installation.
