@@ -66,6 +66,7 @@ func setup(stdin io.Reader, out, errOut io.Writer, env Env) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(out, "Checking installed applications...")
 	discoveries := env.discoverApplications(userHome)
 	discoveredAt := env.now()
 	p := newPrompter(stdin, out)

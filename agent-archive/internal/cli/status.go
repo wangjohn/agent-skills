@@ -37,14 +37,20 @@ type appStatus struct {
 	// scan issues, and gaps recorded inside captured bundles. A blocked
 	// session's last published snapshot, if any, stays retained. These are
 	// recorded gaps, not errors.
-	CaptureGaps             []archive.CaptureGap `json:"capture_gaps,omitempty"`
-	Installed               bool                 `json:"installed"`
-	InstalledVersion        string               `json:"installed_version,omitempty"`
-	VersionSource           string               `json:"installed_version_source,omitempty"`
-	VersionObservedAt       time.Time            `json:"installed_version_observed_at,omitempty"`
-	VersionState            string               `json:"installed_version_state"`
-	VersionSupport          string               `json:"installed_version_support"`
-	Capabilities            captureCapabilities  `json:"capabilities"`
+	CaptureGaps       []archive.CaptureGap `json:"capture_gaps,omitempty"`
+	Installed         bool                 `json:"installed"`
+	InstalledVersion  string               `json:"installed_version,omitempty"`
+	VersionSource     string               `json:"installed_version_source,omitempty"`
+	VersionObservedAt time.Time            `json:"installed_version_observed_at,omitempty"`
+	VersionKind       string               `json:"installed_version_kind,omitempty"`
+	VersionState      string               `json:"installed_version_state"`
+	VersionSupport    string               `json:"installed_version_support"`
+	// VersionSupportReason is set when VersionSupport is unverified. Verified
+	// captures report the harness's own version (Codex cli_version, Claude
+	// Code record version, Cursor hook cursor_version) in HarnessVersions; the
+	// installed version comes from discovery and may be numbered differently.
+	VersionSupportReason    string              `json:"installed_version_support_reason,omitempty"`
+	Capabilities            captureCapabilities `json:"capabilities"`
 	verifiedHarnessVersions []string
 
 	Code            string    `json:"code"`
@@ -70,7 +76,10 @@ type statusView struct {
 	Apps               []appStatus         `json:"applications"`
 	Collector          collector.Status    `json:"collector"`
 	CaptureDiagnostics []captureDiagnostic `json:"capture_diagnostics,omitempty"`
-	Next               string              `json:"next_action"`
+	// Warnings lists advisory local files that could not be read; status
+	// still reports everything else.
+	Warnings []string `json:"warnings,omitempty"`
+	Next     string   `json:"next_action"`
 }
 
 func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
@@ -108,7 +117,7 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 			gaps = fmt.Sprintf("; %d with a capture gap", len(app.CaptureGaps))
 		}
 		fmt.Fprintf(stdout, "%s: %s (%d session(s)%s); hooks %s\n", appName(app.Name), app.State, app.Sessions, gaps, app.Hooks)
-		fmt.Fprintf(stdout, "  Installed version: %s; support %s.\n", installedVersionLabel(app), app.VersionSupport)
+		fmt.Fprintf(stdout, "  Installed version: %s; support %s%s.\n", installedVersionLabel(app), app.VersionSupport, versionSupportNote(app))
 		if app.Capabilities.FreshStart.State == "unavailable" {
 			fmt.Fprintf(stdout, "  Fresh-start capture: unavailable. %s\n", app.Capabilities.FreshStart.NextAction)
 		}
@@ -128,8 +137,25 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	if view.Collector.LastError != "" {
 		fmt.Fprintf(stdout, "Last error:    %s\n", view.Collector.LastError)
 	}
+	for _, warning := range view.Warnings {
+		fmt.Fprintf(stdout, "Warning:       %s\n", warning)
+	}
 	fmt.Fprintf(stdout, "\nNext: %s\n", view.Next)
 	return 0
+}
+
+// versionSupportNote explains an unverified installed version in the text
+// status without changing the support state or reason code.
+func versionSupportNote(app appStatus) string {
+	switch app.VersionSupportReason {
+	case supportReasonNoVerifiedCapture:
+		return " (no session from this version has been published and read back yet)"
+	case supportReasonNoMatchingVersion:
+		return " (verified sessions came from a different version)"
+	case supportReasonVersionSourceMismatch:
+		return " (installed version and captured versions use different numbering; cannot be compared)"
+	}
+	return ""
 }
 
 func installedVersionLabel(app appStatus) string {
@@ -313,7 +339,10 @@ func readStatus(env Env) (view statusView, err error) {
 	executable, executableErr := env.executable()
 	discovered, err := readApplicationDiscoveries(home)
 	if err != nil {
-		return view, err
+		// Advisory only: a damaged observation file degrades installed
+		// versions to unknown rather than hiding the rest of the status.
+		view.Warnings = append(view.Warnings, fmt.Sprintf("Installed versions could not be read from %s: %v. Run agent-archive setup to refresh them.", applicationDiscoveriesPath(home), err))
+		discovered = map[string]applicationDiscovery{}
 	}
 	for i := range view.Apps {
 		appDiscovery := discovered[view.Apps[i].Name]
@@ -327,9 +356,10 @@ func readStatus(env Env) (view statusView, err error) {
 		view.Apps[i].InstalledVersion = appDiscovery.Version
 		view.Apps[i].VersionSource = appDiscovery.VersionSource
 		view.Apps[i].VersionObservedAt = appDiscovery.ObservedAt
+		view.Apps[i].VersionKind = appDiscovery.VersionKind
 		view.Apps[i].VersionState = appDiscovery.VersionState
 		view.Apps[i].Capabilities = captureCapabilityProfile(view.Apps[i].Name)
-		view.Apps[i].VersionSupport = installedVersionSupport(appDiscovery, view.Apps[i].verifiedHarnessVersions)
+		view.Apps[i].VersionSupport, view.Apps[i].VersionSupportReason = installedVersionSupportDetail(appDiscovery, view.Apps[i].verifiedHarnessVersions)
 		installed, e := hooks.Installed(userHome, executable, view.Apps[i].Name)
 		switch {
 		case e != nil || executableErr != nil:

@@ -163,6 +163,9 @@ var allowedKeys = map[string]bool{
 	"sha256": true, "message_id": true, "settings": true, "model_id": true, "discovered": true, "installed": true, "snapshot": true, "source": true,
 	"coverage": true, "skills": true, "redacted": true, "observed_at": true,
 	"model_params": true, "value": true, "cli_version": true, "agent_id": true,
+	// "version" is the per-record Claude Code build stamp; it attributes a
+	// published capture to an installed version. Values still pass sanitizeValue.
+	"version":     true,
 	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"truncated": true, "omitted_count": true, "snapshot_omitted_count": true, "inventory_complete": true, "root_status": true,
 	"gaps":      true,
