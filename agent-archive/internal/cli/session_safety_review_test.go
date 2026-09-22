@@ -97,9 +97,14 @@ func TestCompactFromSubdirectoryKeepsProjectIdentity(t *testing.T) {
 	if len(regs) != 1 || regs[0].ProjectRoot != "/work/widget" || regs[0].TranscriptPath != "/synthetic/t2.jsonl" || !regs[0].SessionStartedAt.Equal(at) {
 		t.Fatalf("registration %+v", regs)
 	}
+	// Both the fresh start and the compact continuation are lifecycle
+	// evidence for the same session; neither asks for an upload.
 	requests, err := store.LoadRequests()
-	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 1 || requests[0].HookEvidence[0].Provenance != "hook:claude:sessionstart" {
+	if err != nil || len(requests) != 1 || len(requests[0].HookEvidence) != 2 || !requests[0].Deferred {
 		t.Fatalf("compact lifecycle evidence was not recorded: %+v err=%v", requests, err)
+	}
+	if last := requests[0].HookEvidence[1]; last.Provenance != "hook:claude:sessionstart" || last.Payload["model"] != "model-x" {
+		t.Fatalf("compact lifecycle evidence was not recorded: %+v", last)
 	}
 	// A continuation reported from a different configured project is still a conflict.
 	compact["cwd"] = "/work/other/sub"

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -444,6 +445,108 @@ func TestStopRequestFlushesRateLimitAndPreservesEarlierHookEvidence(t *testing.T
 	bundle := fetchBundle(t, store, fetchMetadata(t, store, "codex", "session-1"))
 	if len(bundle.SupplementalEvidence) != 2 {
 		t.Fatalf("hook evidence was lost across scans: %#v", bundle.SupplementalEvidence)
+	}
+}
+
+// A session that is being used generates a lifecycle event on every prompt.
+// That evidence must ride the normal debounce, not force an upload each time.
+func TestPromptEvidenceRidesTheUploadIntervalAndIsPublished(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := local.SaveEvidence("session-1", "sessionstart", t0, lifecycleEvidence(t0, "SessionStart")); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil || len(result.Published) != 1 {
+		t.Fatalf("first publication is never rate limited: result=%#v err=%v", result, err)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("deferred request was not acknowledged by its publication: %#v", requests)
+	}
+	const prompts = 5
+	var at time.Time
+	for i := 1; i <= prompts; i++ {
+		at = t0.Add(time.Duration(i) * 10 * time.Second)
+		if err := local.SaveEvidence("session-1", "userpromptsubmit", at, lifecycleEvidence(at, "UserPromptSubmit")); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return at }, MinUploadInterval: 3 * time.Minute})
+		if err != nil || len(result.Published) != 0 || len(result.Skipped) != 1 {
+			t.Fatalf("prompt %d forced an upload inside the interval: result=%#v err=%v", i, result, err)
+		}
+	}
+	if objects, err := store.List(context.Background(), ""); err != nil || len(objects) != 2 {
+		t.Fatalf("prompts uploaded new objects: %v err=%v", objects, err)
+	}
+	requests, err := local.LoadRequests()
+	if err != nil || len(requests) != 1 || !requests[0].Deferred || len(requests[0].HookEvidence) != prompts || !requests[0].RequestedAt.Equal(t0.Add(10*time.Second)) {
+		t.Fatalf("prompt evidence must accumulate on one deferred request: %#v err=%v", requests, err)
+	}
+	tPublish := t0.Add(4 * time.Minute)
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return tPublish }, MinUploadInterval: 3 * time.Minute})
+	if err != nil || len(result.Published) != 1 {
+		t.Fatalf("deferred evidence was never published: result=%#v err=%v", result, err)
+	}
+	bundle := fetchBundle(t, store, fetchMetadata(t, store, "codex", "session-1"))
+	if len(bundle.SupplementalEvidence) != prompts+1 {
+		t.Fatalf("published bundle lost prompt evidence: %#v", bundle.SupplementalEvidence)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("deferred request outlived its publication: %#v", requests)
+	}
+}
+
+// A stop after prompt evidence is still the debounce flush it always was, and
+// the prompt evidence it follows is published with it.
+func TestStopAfterPromptEvidenceFlushesImmediately(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTranscript(t, dir, "codex.jsonl", codexTranscript)
+	local := newTestStore(t)
+	if err := local.SaveRegistration(registration(t, path)); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewMemoryStore()
+	t0 := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if _, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t0 }}); err != nil {
+		t.Fatal(err)
+	}
+	t1 := t0.Add(10 * time.Second)
+	if err := local.SaveEvidence("session-1", "userpromptsubmit", t1, lifecycleEvidence(t1, "UserPromptSubmit")); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t1 }, MinUploadInterval: 3 * time.Minute}); err != nil || len(result.Published) != 0 {
+		t.Fatalf("prompt evidence bypassed the interval: result=%#v err=%v", result, err)
+	}
+	t2 := t1.Add(10 * time.Second)
+	if err := local.SaveRequest("session-1", "stop", t2, lifecycleEvidence(t2, "Stop")); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := local.LoadRequests()
+	if err != nil || len(requests) != 1 || requests[0].Deferred || !requests[0].RequestedAt.Equal(t2) || len(requests[0].Reasons) != 2 {
+		t.Fatalf("stop did not make the pending request urgent: %#v err=%v", requests, err)
+	}
+	result, err := Run(context.Background(), local, store, Options{MachineID: "m", Now: func() time.Time { return t2 }, MinUploadInterval: 3 * time.Minute})
+	if err != nil || len(result.Published) != 1 {
+		t.Fatalf("stop request did not flush debounce: result=%#v err=%v", result, err)
+	}
+	bundle := fetchBundle(t, store, fetchMetadata(t, store, "codex", "session-1"))
+	if len(bundle.SupplementalEvidence) != 2 {
+		t.Fatalf("prompt evidence was lost by the flush: %#v", bundle.SupplementalEvidence)
+	}
+	if requests, _ := local.LoadRequests(); len(requests) != 0 {
+		t.Fatalf("request outlived its publication: %#v", requests)
+	}
+}
+
+func lifecycleEvidence(at time.Time, name string) archive.SupplementalEvidence {
+	return archive.SupplementalEvidence{
+		Kind: archive.EvidenceKindLifecycleHook, ObservedAt: at,
+		Provenance: "hook:codex:" + strings.ToLower(name), Payload: map[string]any{"event_name": name},
 	}
 }
 

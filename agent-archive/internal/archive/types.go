@@ -14,6 +14,10 @@ const (
 	SourceSchemaVersion   = 1
 	MetadataSchemaVersion = 1
 	FilterVersion         = "1"
+	// OpenTelemetryGenAIRevision pins the upstream definitions used by the
+	// three gen_ai.* attributes emitted by BuildMetadata. The archive is not
+	// an OTLP payload; all agent_archive.* attributes are local extensions.
+	OpenTelemetryGenAIRevision = "open-telemetry/semantic-conventions@aec6e9d3e86754683dab7c707655d69d953b2768 (v1.37.0)"
 )
 
 // ParserStatus reports how completely a metadata derivation covered its
@@ -26,9 +30,7 @@ const (
 	ParserStatusComplete ParserStatus = "complete"
 )
 
-// MetadataState is the session lifecycle state recorded on Metadata. Only
-// MetadataStateUnknown is produced today; the others are reserved by the
-// schema for future lifecycle tracking.
+// MetadataState is the session lifecycle state recorded on Metadata.
 type MetadataState string
 
 const (
@@ -36,6 +38,18 @@ const (
 	MetadataStateIdle    MetadataState = "idle"
 	MetadataStateClosed  MetadataState = "closed"
 	MetadataStateUnknown MetadataState = "unknown"
+)
+
+// TurnOutcome reports how the most recently observed turn ended. Completion
+// means only that a supported native event explicitly reported completion; it
+// is not a claim that the task succeeded.
+type TurnOutcome string
+
+const (
+	TurnOutcomeCompleted   TurnOutcome = "completed"
+	TurnOutcomeInterrupted TurnOutcome = "interrupted"
+	TurnOutcomeError       TurnOutcome = "error"
+	TurnOutcomeUnknown     TurnOutcome = "unknown"
 )
 
 // SkillDetection reports whether skill-usage evidence was observed for a
@@ -270,6 +284,13 @@ type ParserInfo struct {
 	Status  ParserStatus `json:"status"`
 }
 
+// SemanticConventionsInfo identifies the exact upstream vocabulary revision
+// used for matching attribute names. Local extensions use agent_archive.*.
+type SemanticConventionsInfo struct {
+	Name     string `json:"name"`
+	Revision string `json:"revision"`
+}
+
 // Counts intentionally uses pointers: nil means unavailable, rather than an
 // invented zero after a partial or failed parse.
 type Counts struct {
@@ -302,24 +323,26 @@ type SkillUse struct {
 // Metadata is the replaceable, source-first reader index. It contains no
 // transcript text or tool payloads.
 type Metadata struct {
-	SchemaVersion     int             `json:"schema_version"`
-	SessionID         string          `json:"session_id"`
-	NativeSessionID   string          `json:"native_session_id"`
-	MachineID         string          `json:"machine_id"`
-	ProjectID         string          `json:"project_id"`
-	StartedAt         time.Time       `json:"started_at"`
-	CapturedAt        time.Time       `json:"captured_at"`
-	MetadataDerivedAt time.Time       `json:"metadata_derived_at"`
-	Harness           Harness         `json:"harness"`
-	Adapter           AdapterInfo     `json:"adapter"`
-	Parser            ParserInfo      `json:"parser"`
-	FilterVersion     string          `json:"filter_version"`
-	State             MetadataState   `json:"state"`
-	Models            []ModelSummary  `json:"models,omitempty"`
-	SkillsAvailable   []SkillSnapshot `json:"skills_available,omitempty"`
-	SkillsUsed        []SkillUse      `json:"skills_used,omitempty"`
-	SkillDetection    SkillDetection  `json:"skill_detection"`
-	Counts            Counts          `json:"counts"`
-	CaptureGaps       []CaptureGap    `json:"capture_gaps,omitempty"`
-	SourceBundle      SourceReference `json:"source_bundle"`
+	SchemaVersion       int                      `json:"schema_version"`
+	SessionID           string                   `json:"session_id"`
+	NativeSessionID     string                   `json:"native_session_id"`
+	MachineID           string                   `json:"machine_id"`
+	ProjectID           string                   `json:"project_id"`
+	StartedAt           time.Time                `json:"started_at"`
+	CapturedAt          time.Time                `json:"captured_at"`
+	MetadataDerivedAt   time.Time                `json:"metadata_derived_at"`
+	Harness             Harness                  `json:"harness"`
+	Adapter             AdapterInfo              `json:"adapter"`
+	Parser              ParserInfo               `json:"parser"`
+	FilterVersion       string                   `json:"filter_version"`
+	State               MetadataState            `json:"state"`
+	TurnOutcome         TurnOutcome              `json:"turn_outcome,omitempty"`
+	SemanticConventions *SemanticConventionsInfo `json:"semantic_conventions,omitempty"`
+	Models              []ModelSummary           `json:"models,omitempty"`
+	SkillsAvailable     []SkillSnapshot          `json:"skills_available,omitempty"`
+	SkillsUsed          []SkillUse               `json:"skills_used,omitempty"`
+	SkillDetection      SkillDetection           `json:"skill_detection"`
+	Counts              Counts                   `json:"counts"`
+	CaptureGaps         []CaptureGap             `json:"capture_gaps,omitempty"`
+	SourceBundle        SourceReference          `json:"source_bundle"`
 }

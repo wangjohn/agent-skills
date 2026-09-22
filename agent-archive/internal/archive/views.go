@@ -301,9 +301,12 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		MachineID: machineID, ProjectID: bundle.ProjectID, StartedAt: startedAt.UTC(), CapturedAt: bundle.Capture.CapturedAt.UTC(),
 		MetadataDerivedAt: derivedAt.UTC(), Harness: bundle.Capture.Harness,
 		Adapter: AdapterInfo{Name: bundle.Capture.AdapterName, Version: bundle.Capture.AdapterVersion}, Parser: parser,
-		FilterVersion: bundle.Capture.FilterVersion, State: MetadataStateUnknown, SkillDetection: SkillDetectionUnavailable,
-		CaptureGaps: append([]CaptureGap(nil), bundle.Capture.Gaps...), SourceBundle: reference,
+		FilterVersion: bundle.Capture.FilterVersion, State: MetadataStateUnknown, TurnOutcome: TurnOutcomeUnknown,
+		SemanticConventions: &SemanticConventionsInfo{Name: "OpenTelemetry GenAI semantic conventions", Revision: OpenTelemetryGenAIRevision},
+		SkillDetection:      SkillDetectionUnavailable,
+		CaptureGaps:         append([]CaptureGap(nil), bundle.Capture.Gaps...), SourceBundle: reference,
 	}
+	metadata.State, metadata.TurnOutcome = deriveLifecycle(bundle.SupplementalEvidence)
 	view, err := ParseNormalized(bundle)
 	if err != nil {
 		metadata.Parser.Status = ParserStatusFailed
@@ -335,7 +338,7 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 				attributes["gen_ai.provider.name"] = turn.Provider
 			}
 			if turn.Reasoning != "" {
-				attributes["gen_ai.request.reasoning.level"] = turn.Reasoning
+				attributes["agent_archive.request.reasoning_level"] = turn.Reasoning
 			}
 			model = &ModelSummary{Attributes: attributes, Source: ModelSummarySourceNativeTranscript, ResponseModelStatus: responseStatus}
 			models[key] = model
@@ -346,13 +349,18 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 		}
 		*model.TurnCount++
 	}
-	metadata.Counts.Messages = &messages
-	if len(turnIDs) > 0 {
-		turns := len(turnIDs)
-		metadata.Counts.Turns = &turns
+	// Native text is retained precisely because its structure is not proven.
+	// Counts derived only from the structured subset would look complete, so
+	// leave all structure-dependent totals unknown whenever text is present.
+	if len(bundle.NativeText) == 0 {
+		metadata.Counts.Messages = &messages
+		if len(turnIDs) > 0 {
+			turns := len(turnIDs)
+			metadata.Counts.Turns = &turns
+		}
+		toolCalls := len(view.ToolCalls)
+		metadata.Counts.ToolCalls = &toolCalls
 	}
-	toolCalls := len(view.ToolCalls)
-	metadata.Counts.ToolCalls = &toolCalls
 	modelKeys := make([]string, 0, len(models))
 	for key := range models {
 		modelKeys = append(modelKeys, key)
@@ -373,6 +381,101 @@ func BuildMetadata(bundle SourceBundle, machineID string, startedAt, derivedAt t
 	return metadata, nil
 }
 
+type lifecycleObservation struct {
+	at         time.Time
+	event      string
+	status     string
+	provenance string
+	payloadKey string
+}
+
+// deriveLifecycle applies conservative rules to filtered hook evidence.
+// Sorting makes duplicate, delayed, and out-of-order delivery deterministic.
+// Evidence captured before event_name was retained stays unknown rather than
+// being reconstructed from local operational request state.
+func deriveLifecycle(evidence []SupplementalEvidence) (MetadataState, TurnOutcome) {
+	var observations []lifecycleObservation
+	for _, item := range evidence {
+		if item.Kind != EvidenceKindLifecycleHook {
+			continue
+		}
+		event := strings.ToLower(strings.ReplaceAll(firstString(item.Payload, "event_name"), "_", ""))
+		if event == "" {
+			continue
+		}
+		payload, _ := json.Marshal(item.Payload)
+		observations = append(observations, lifecycleObservation{
+			at: item.ObservedAt, event: event, status: strings.ToLower(firstString(item.Payload, "status")),
+			provenance: item.Provenance, payloadKey: string(payload),
+		})
+	}
+	sort.Slice(observations, func(i, j int) bool {
+		if !observations[i].at.Equal(observations[j].at) {
+			return observations[i].at.Before(observations[j].at)
+		}
+		if lifecycleRank(observations[i].event) != lifecycleRank(observations[j].event) {
+			return lifecycleRank(observations[i].event) < lifecycleRank(observations[j].event)
+		}
+		left := observations[i].event + "\x00" + observations[i].status + "\x00" + observations[i].provenance + "\x00" + observations[i].payloadKey
+		right := observations[j].event + "\x00" + observations[j].status + "\x00" + observations[j].provenance + "\x00" + observations[j].payloadKey
+		return left < right
+	})
+	state, outcome := MetadataStateUnknown, TurnOutcomeUnknown
+	for _, observation := range observations {
+		switch observation.event {
+		case "sessionstart", "userpromptsubmit", "beforesubmitprompt":
+			state, outcome = MetadataStateActive, TurnOutcomeUnknown
+		case "stop":
+			state, outcome = MetadataStateIdle, documentedLifecycleOutcome(observation.event, observation.status, observation.provenance)
+		case "interrupt":
+			state, outcome = MetadataStateIdle, TurnOutcomeInterrupted
+		case "stopfailure":
+			state, outcome = MetadataStateIdle, TurnOutcomeError
+		case "sessionend":
+			state = MetadataStateClosed
+			// Closing the session does not undo a previously observed turn outcome.
+			if observed := documentedLifecycleOutcome(observation.event, observation.status, observation.provenance); observed != TurnOutcomeUnknown {
+				outcome = observed
+			}
+		}
+		// A subagent finishing says nothing about the parent session, which
+		// is still running: its state and outcome are left as observed.
+	}
+	return state, outcome
+}
+
+func lifecycleRank(event string) int {
+	switch event {
+	case "sessionstart", "userpromptsubmit", "beforesubmitprompt":
+		return 1
+	case "stop", "interrupt", "stopfailure":
+		return 2
+	case "sessionend", "subagentstop":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func documentedLifecycleOutcome(event, status, provenance string) TurnOutcome {
+	if event == "stop" && provenance != "hook:cursor:stop" {
+		return TurnOutcomeUnknown
+	}
+	if event == "sessionend" && provenance != "hook:cursor:sessionend" {
+		return TurnOutcomeUnknown
+	}
+	switch status {
+	case "completed":
+		return TurnOutcomeCompleted
+	case "aborted":
+		return TurnOutcomeInterrupted
+	case "error":
+		return TurnOutcomeError
+	default:
+		return TurnOutcomeUnknown
+	}
+}
+
 func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 	seen := map[string]bool{}
 	for _, evidence := range bundle.SupplementalEvidence {
@@ -390,13 +493,13 @@ func deriveHookModels(bundle SourceBundle, metadata *Metadata) {
 		seen[key] = true
 		attrs := map[string]string{"gen_ai.request.model": id}
 		if label != "" {
-			attrs["gen_ai.request.model.label"] = label
+			attrs["agent_archive.request.model_label"] = label
 		}
 		if params, ok := evidence.Payload["model_params"].([]any); ok {
 			for _, raw := range params {
 				if p, ok := raw.(map[string]any); ok {
 					if name, value := firstString(p, "id"), firstString(p, "value"); name != "" {
-						attrs["gen_ai.request.setting."+name] = value
+						attrs["agent_archive.request.setting."+name] = value
 					}
 				}
 			}

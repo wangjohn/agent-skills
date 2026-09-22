@@ -264,6 +264,122 @@ func TestCursorTextOmitsHiddenSectionContinuationLines(t *testing.T) {
 	}
 }
 
+func TestCursorTextMetadataLeavesStructuredCountsUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	filtered, err := (CursorAdapter{}).FilterText(strings.NewReader("User: hello\nAssistant: hi\n"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := registration()
+	reg.Harness = Harness{Name: "cursor"}
+	bundle, err := NewSourceBundle(reg, CursorAdapter{}, filtered, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := BuildMetadata(bundle, "machine", reg.SessionStartedAt, now.Add(time.Minute), SourceReference{Key: "sessions/cursor/archive-123/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64), CompressedBytes: 1}, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Counts.Messages != nil || metadata.Counts.Turns != nil || metadata.Counts.ToolCalls != nil {
+		t.Fatalf("unparsed text produced structured counts: %#v", metadata.Counts)
+	}
+	if metadata.Counts.ExplicitFeedback == nil || *metadata.Counts.ExplicitFeedback != 0 {
+		t.Fatalf("independently observed feedback count should remain known: %#v", metadata.Counts)
+	}
+}
+
+func TestLifecycleDerivationIsOrderedConservativeAndDeterministic(t *testing.T) {
+	now := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	event := func(at time.Time, name string, fields map[string]any) SupplementalEvidence {
+		payload := map[string]any{"event_name": name}
+		for key, value := range fields {
+			payload[key] = value
+		}
+		return SupplementalEvidence{Kind: EvidenceKindLifecycleHook, ObservedAt: at, Provenance: "hook:fixture:" + strings.ToLower(name), Payload: payload}
+	}
+	// Deliberately append out of order and repeat an exact event. The delayed
+	// event must not overwrite the later state, and retries must be inert.
+	evidence := []SupplementalEvidence{
+		event(now.Add(2*time.Minute), "Stop", nil),
+		event(now, "SessionStart", nil),
+		event(now.Add(time.Minute), "Stop", nil),
+		event(now.Add(2*time.Minute), "Stop", nil),
+		event(now.Add(3*time.Minute), "UserPromptSubmit", nil),
+	}
+	state, outcome := deriveLifecycle(evidence)
+	if state != MetadataStateActive || outcome != TurnOutcomeUnknown {
+		t.Fatalf("active transition = %q/%q", state, outcome)
+	}
+	state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "Stop", nil)))
+	if state != MetadataStateIdle || outcome != TurnOutcomeUnknown {
+		t.Fatalf("generic stop must be idle with unknown outcome, got %q/%q", state, outcome)
+	}
+	state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "Stop", map[string]any{"status": "completed"})))
+	if state != MetadataStateIdle || outcome != TurnOutcomeUnknown {
+		t.Fatalf("generic stop status must not manufacture completion, got %q/%q", state, outcome)
+	}
+	cursorStop := event(now.Add(4*time.Minute), "Stop", map[string]any{"status": "completed"})
+	cursorStop.Provenance = "hook:cursor:stop"
+	state, outcome = deriveLifecycle(append(evidence, cursorStop))
+	if state != MetadataStateIdle || outcome != TurnOutcomeCompleted {
+		t.Fatalf("documented Cursor stop completion = %q/%q", state, outcome)
+	}
+	// A subagent finishing does not close, idle, or complete the parent
+	// session, whatever status it reports and from whichever provenance.
+	for _, status := range []string{"incomplete", "completed"} {
+		state, outcome = deriveLifecycle(append(evidence, event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": status})))
+		if state != MetadataStateActive || outcome != TurnOutcomeUnknown {
+			t.Fatalf("subagent stop with status %q changed the parent session to %q/%q", status, state, outcome)
+		}
+	}
+	cursorSubagent := event(now.Add(4*time.Minute), "SubagentStop", map[string]any{"status": "completed"})
+	cursorSubagent.Provenance = "hook:cursor:subagentstop"
+	state, outcome = deriveLifecycle(append(evidence, cursorStop, cursorSubagent))
+	if state != MetadataStateIdle || outcome != TurnOutcomeCompleted {
+		t.Fatalf("subagent stop after a documented stop must leave it as observed, got %q/%q", state, outcome)
+	}
+	for name, want := range map[string]TurnOutcome{"Interrupt": TurnOutcomeInterrupted, "StopFailure": TurnOutcomeError} {
+		state, outcome = deriveLifecycle(append(evidence, event(now.Add(5*time.Minute), name, nil)))
+		if state != MetadataStateIdle || outcome != want {
+			t.Fatalf("%s = %q/%q", name, state, outcome)
+		}
+	}
+	state, outcome = deriveLifecycle(append(evidence, event(now.Add(6*time.Minute), "SessionEnd", nil)))
+	if state != MetadataStateClosed || outcome != TurnOutcomeUnknown {
+		t.Fatalf("closure = %q/%q", state, outcome)
+	}
+}
+
+func TestMetadataPinsSemanticConventionAndOldMetadataStillLoads(t *testing.T) {
+	now := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "cursor"}, AdapterName: "cursor", AdapterVersion: "1", SourceFormat: "jsonl", FilterVersion: FilterVersion, CapturedAt: now}, NativeRecords: []map[string]any{{"role": "assistant", "model": "gpt-x", "reasoning_effort": "high", "content": "done"}}}
+	ref := SourceReference{Key: "sessions/cursor/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64), CompressedBytes: 1}
+	metadata, err := BuildMetadata(bundle, "machine", now, now, ref, ParserInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.SemanticConventions == nil || metadata.SemanticConventions.Revision != OpenTelemetryGenAIRevision {
+		t.Fatalf("semantic conventions = %#v", metadata.SemanticConventions)
+	}
+	attrs := metadata.Models[0].Attributes
+	if attrs["gen_ai.request.model"] != "gpt-x" || attrs["agent_archive.request.reasoning_level"] != "high" || attrs["gen_ai.request.reasoning.level"] != "" {
+		t.Fatalf("attribute mapping = %#v", attrs)
+	}
+
+	oldJSON := `{"schema_version":1,"source_bundle":{"key":"sessions/codex/a/source.` + strings.Repeat("a", 64) + `.json.gz","sha256":"` + strings.Repeat("a", 64) + `","compressed_bytes":1}}`
+	var old Metadata
+	if err := json.Unmarshal([]byte(oldJSON), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.TurnOutcome != "" || old.SemanticConventions != nil || old.ValidateSourceReference() != nil {
+		t.Fatalf("old metadata compatibility failed: %#v", old)
+	}
+	reencoded, err := json.Marshal(old)
+	if err != nil || bytes.Contains(reencoded, []byte(`"turn_outcome":""`)) {
+		t.Fatalf("old metadata re-encoded invalid outcome: %s err=%v", reencoded, err)
+	}
+}
+
 func TestPreciseNativeSkillReadInference(t *testing.T) {
 	bundle := SourceBundle{SchemaVersion: 1, ArchiveSessionID: "a", NativeSessionID: "n", ProjectID: "p", Capture: SourceCapture{Harness: Harness{Name: "claude"}, AdapterName: "claude", AdapterVersion: "1", SourceFormat: "x", FilterVersion: FilterVersion, CapturedAt: time.Now()}, NativeRecords: []map[string]any{{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "/skills/review-pr/SKILL.md"}}, {"type": "function_call", "command": "cat /skills/create/SKILL.md"}, {"type": "message", "role": "user", "content": "echo SKILL.md"}}}
 	m, err := BuildMetadata(bundle, "m", time.Now(), time.Now(), SourceReference{Key: "sessions/claude/a/source." + strings.Repeat("a", 64) + ".json.gz", SHA256: strings.Repeat("a", 64)}, ParserInfo{})

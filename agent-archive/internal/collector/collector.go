@@ -199,15 +199,17 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 		return outcomeSkipped, err
 	}
 	if havePending {
-		newUrgentRequest := !pending.Attempted && req.Token != "" && req.Token != pending.RequestToken
-		if !newUrgentRequest {
+		newRequest := !pending.Attempted && req.Token != "" && req.Token != pending.RequestToken
+		if !newRequest {
 			if !pending.ReadyAt.IsZero() && now.Before(pending.ReadyAt) {
 				return outcomeRateLimited, nil
 			}
 			return publishPending(ctx, local, store, reg.ArchiveSessionID, pending, now, opts)
 		}
 		// A stop/end request is a natural debounce flush. A merely rate-limited,
-		// never-attempted candidate can be safely replaced by a richer one.
+		// never-attempted candidate can be safely replaced by a richer one;
+		// deferred lifecycle evidence enriches it without changing when it
+		// becomes ready.
 	}
 	if !havePending {
 		if outcome, handled, err := regenerateMetadata(ctx, local, store, reg, now, opts); handled || err != nil {
@@ -369,7 +371,7 @@ func processSession(ctx context.Context, local *LocalStore, store storage.Object
 	}
 
 	readyAt := now
-	if req.Token == "" && !lastPublishedAt.IsZero() && now.Sub(lastPublishedAt) < opts.minUploadInterval() {
+	if !req.urgent() && !lastPublishedAt.IsZero() && now.Sub(lastPublishedAt) < opts.minUploadInterval() {
 		readyAt = lastPublishedAt.Add(opts.minUploadInterval())
 	}
 	pending = PendingPublication{
