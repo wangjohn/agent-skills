@@ -47,7 +47,7 @@ func TestStatusRequiresEveryApplicationProjectPair(t *testing.T) {
 	}
 }
 
-func TestPairVerificationSurvivesRemovalButNotReactivationOrDestinationChange(t *testing.T) {
+func TestPairVerificationSurvivesUnrelatedChangesButNotReactivationOrDestinationChange(t *testing.T) {
 	home, userHome := t.TempDir(), t.TempDir()
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	projectA, projectB := t.TempDir(), t.TempDir()
@@ -84,6 +84,20 @@ func TestPairVerificationSurvivesRemovalButNotReactivationOrDestinationChange(t 
 	}
 	cfg.Harnesses = []string{"codex"}
 
+	projectC := t.TempDir()
+	cfg.Archive.Projects = append(cfg.Archive.Projects, archive.ProjectActivation{ProjectID: archive.ProjectID(projectC), Root: projectC, Included: true, ActivatedAt: now})
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	view, err = readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Apps[0].Projects) != 2 || !view.Apps[0].Projects[0].ReadBackVerified || view.Apps[0].Projects[1].VerificationState != "not_verified" || view.Apps[0].ReadBackVerified {
+		t.Fatalf("adding an unrelated project changed the verified pair: %#v", view.Apps[0])
+	}
+	cfg.Archive.Projects = cfg.Archive.Projects[:1]
+
 	cfg.Archive.Projects[0].ActivatedAt = now.Add(time.Hour)
 	if err := config.Save(home, cfg); err != nil {
 		t.Fatal(err)
@@ -107,6 +121,90 @@ func TestPairVerificationSurvivesRemovalButNotReactivationOrDestinationChange(t 
 	}
 	if view.Apps[0].ReadBackVerified {
 		t.Fatalf("destination change retained verification: %#v", view.Apps[0])
+	}
+}
+
+func TestStatusCountsLegacySessionsWithoutConfiguredProjects(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	// Older programmatic configurations carry no projects; AcceptSession
+	// admits their sessions and the collector publishes them.
+	cfg := pairTestConfig(now, []string{"codex"})
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	remote := storage.NewMemoryStore()
+	publishPairSession(t, home, store, remote, cfg, now, "codex-legacy", "codex", project, false)
+	env := pairStatusEnv(t, home, userHome, now, "codex")
+	view, err := readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := view.Apps[0]
+	if len(app.Projects) != 0 || app.Sessions != 1 || !app.HookObserved || !app.CapturedLocally || !app.Published || app.PublishedSessions != 1 || app.ReadBackVerified || app.VerificationState != "incomplete" {
+		t.Fatalf("legacy session dropped from status: %#v", app)
+	}
+	if !strings.Contains(view.Next, "include at least one project") {
+		t.Fatalf("next action should still ask for a project: %q", view.Next)
+	}
+	if summary, err := verifyPublications(home, cfg, testEnv(t, home, now), store, remote); err != nil || summary.Verified != 1 {
+		t.Fatalf("verify summary=%#v err=%v", summary, err)
+	}
+	view, err = readStatus(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app := view.Apps[0]; !app.ReadBackVerified || app.VerifiedSessions != 1 || app.State != "published; source verified" {
+		t.Fatalf("legacy session verification not reported: %#v", app)
+	}
+}
+
+func TestStatusIgnoresDuplicateProjectRoots(t *testing.T) {
+	home, userHome, project := t.TempDir(), t.TempDir(), t.TempDir()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	cfg := pairTestConfig(now, []string{"codex"}, project, project)
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	remote := storage.NewMemoryStore()
+	publishPairSession(t, home, store, remote, cfg, now, "codex-a", "codex", project, true)
+	view, err := readStatus(pairStatusEnv(t, home, userHome, now, "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app := view.Apps[0]; len(app.Projects) != 1 || !app.ReadBackVerified || !app.Projects[0].ReadBackVerified {
+		t.Fatalf("duplicate root pinned the app unverified: %#v", app)
+	}
+}
+
+func TestStatusTextDoesNotCallPartialReadBackVerified(t *testing.T) {
+	home, userHome := t.TempDir(), t.TempDir()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	projectA, projectB := t.TempDir(), t.TempDir()
+	cfg := pairTestConfig(now, []string{"codex"}, projectA, projectB)
+	if err := config.Save(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := collector.NewLocalStore(home)
+	remote := storage.NewMemoryStore()
+	publishPairSession(t, home, store, remote, cfg, now, "codex-a", "codex", projectA, true)
+	publishPairSession(t, home, store, remote, cfg, now, "codex-b", "codex", projectB, false)
+	env := pairStatusEnv(t, home, userHome, now, "codex")
+	var out strings.Builder
+	if code := runStatusCommand(nil, &out, &out, env); code != 0 {
+		t.Fatalf("status exit %d: %s", code, out.String())
+	}
+	if text := out.String(); strings.Contains(text, "Read-back verified:") || !strings.Contains(text, "Last read-back: "+now.Format(time.RFC3339)+" (1 of 2 projects verified).") {
+		t.Fatalf("partial read-back reported as verified:\n%s", text)
+	}
+	if summary, err := verifyPublications(home, cfg, testEnv(t, home, now), store, remote); err != nil || summary.Verified != 1 {
+		t.Fatalf("verify summary=%#v err=%v", summary, err)
+	}
+	out.Reset()
+	if code := runStatusCommand(nil, &out, &out, env); code != 0 || !strings.Contains(out.String(), "Read-back verified: "+now.Format(time.RFC3339)+"; evidence is for that publication.") {
+		t.Fatalf("complete read-back not reported as verified (exit %d):\n%s", code, out.String())
 	}
 }
 

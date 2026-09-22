@@ -140,8 +140,14 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 		for _, pair := range app.Projects {
 			fmt.Fprintf(stdout, "  Project %s: %s.\n", pair.ProjectRoot, pair.VerificationState)
 		}
-		if !app.VerifiedAt.IsZero() {
+		switch {
+		case app.ReadBackVerified && !app.VerifiedAt.IsZero():
 			fmt.Fprintf(stdout, "  Read-back verified: %s; evidence is for that publication.\n", formatTimeOrNever(app.VerifiedAt))
+		case !app.VerifiedAt.IsZero():
+			// Some evidence exists but not every project (or session) is
+			// covered, so do not call the app verified on the line below
+			// its "read-back pending" state.
+			fmt.Fprintf(stdout, "  Last read-back: %s (%s).\n", formatTimeOrNever(app.VerifiedAt), readBackProgress(app))
 		}
 		if app.VerificationDetail != "" {
 			fmt.Fprintf(stdout, "  Read-back: %s\n", app.VerificationDetail)
@@ -175,6 +181,21 @@ func versionSupportNote(app appStatus) string {
 		return " (installed version and captured versions use different numbering; cannot be compared)"
 	}
 	return ""
+}
+
+// readBackProgress summarises how much of an app's evidence is verified:
+// projects when the configuration has any, otherwise published sessions.
+func readBackProgress(app appStatus) string {
+	if len(app.Projects) == 0 {
+		return fmt.Sprintf("%d of %d sessions verified", app.VerifiedSessions, app.PublishedSessions)
+	}
+	verified := 0
+	for _, pair := range app.Projects {
+		if pair.ReadBackVerified {
+			verified++
+		}
+	}
+	return fmt.Sprintf("%d of %d projects verified", verified, len(app.Projects))
 }
 
 func installedVersionLabel(app appStatus) string {
@@ -263,6 +284,12 @@ func readStatus(env Env) (view statusView, err error) {
 			if !project.Included {
 				continue
 			}
+			if _, dup := pairIndex[project.Root]; dup {
+				// A hand-edited configuration can repeat a root. The first
+				// entry owns the pair; a second would never receive evidence
+				// and would pin the app unverified.
+				continue
+			}
 			pairIndex[project.Root] = len(app.Projects)
 			app.Projects = append(app.Projects, projectCaptureStatus{
 				ProjectID: string(project.ProjectID), ProjectRoot: project.Root,
@@ -274,14 +301,19 @@ func readStatus(env Env) (view statusView, err error) {
 			if reg.Harness.Name != name || !cfg.AcceptSession(reg) {
 				continue
 			}
-			pairPosition, pairFound := pairIndex[reg.ProjectRoot]
-			if !pairFound {
-				continue
+			// AcceptSession only admits a root without a configured pair
+			// under its legacy branch (no projects configured at all). The
+			// collector still publishes such sessions, so they count toward
+			// the app even though there is no pair to attribute them to.
+			var pair *projectCaptureStatus
+			if position, found := pairIndex[reg.ProjectRoot]; found {
+				pair = &app.Projects[position]
 			}
-			pair := &app.Projects[pairPosition]
 			app.Sessions++
 			app.HookObserved = true
-			pair.HookObserved = true
+			if pair != nil {
+				pair.HookObserved = true
+			}
 			if issue := view.Collector.SessionIssues[reg.ArchiveSessionID]; issue != "" {
 				app.CaptureGaps = append(app.CaptureGaps, archive.CaptureGap{Code: issue, Detail: "Last scan could not update this session; retained evidence was kept. Run agent-archive sync for the failure."})
 			}
@@ -305,7 +337,9 @@ func readStatus(env Env) (view statusView, err error) {
 			if found {
 				if state != collector.CacheStatusBlocked {
 					app.CapturedLocally = true
-					pair.CapturedLocally = true
+					if pair != nil {
+						pair.CapturedLocally = true
+					}
 				}
 				app.CaptureGaps = append(app.CaptureGaps, bundle.Capture.Gaps...)
 				if version := bundle.Capture.AdapterVersion; version != "" && !containsString(app.AdapterVersions, version) {
@@ -326,8 +360,10 @@ func readStatus(env Env) (view statusView, err error) {
 
 				app.Published = true
 				app.PublishedSessions++
-				pair.Published = true
-				pair.PublishedSessions++
+				if pair != nil {
+					pair.Published = true
+					pair.PublishedSessions++
+				}
 				app.State = "published; read-back pending"
 				verification, e := readVerification(home, reg.ArchiveSessionID)
 				if e != nil {
@@ -336,9 +372,11 @@ func readStatus(env Env) (view statusView, err error) {
 				verificationConfigurationID := sessionVerificationConfigurationID(cfg, reg)
 				if verification.ConfigurationID == verificationConfigurationID && verification.PublishedAt.Equal(at) && !verification.VerifiedAt.IsZero() {
 					app.VerifiedSessions++
-					pair.VerifiedSessions++
-					if verification.VerifiedAt.After(pair.VerifiedAt) {
-						pair.VerifiedAt = verification.VerifiedAt
+					if pair != nil {
+						pair.VerifiedSessions++
+						if verification.VerifiedAt.After(pair.VerifiedAt) {
+							pair.VerifiedAt = verification.VerifiedAt
+						}
 					}
 					app.VerificationState = "verified_at_recorded_time"
 					if verification.VerifiedAt.After(app.VerifiedAt) {
@@ -364,6 +402,11 @@ func readStatus(env Env) (view statusView, err error) {
 			}
 		}
 		app.ReadBackVerified = len(app.Projects) > 0
+		if len(app.Projects) == 0 {
+			// Nothing to require per pair (legacy configuration without
+			// projects): the sessions themselves are the evidence.
+			app.ReadBackVerified = app.PublishedSessions > 0 && app.VerifiedSessions == app.PublishedSessions
+		}
 		for i := range app.Projects {
 			pair := &app.Projects[i]
 			pair.ReadBackVerified = pair.PublishedSessions > 0 && pair.VerifiedSessions == pair.PublishedSessions
