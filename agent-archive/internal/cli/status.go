@@ -14,11 +14,15 @@ import (
 )
 
 type appStatus struct {
-	Code            string    `json:"code"`
-	Hooks           string    `json:"hooks"`
-	Name            string    `json:"name"`
-	State           string    `json:"state"`
-	Sessions        int       `json:"sessions"`
+	Code     string `json:"code"`
+	Hooks    string `json:"hooks"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Sessions int    `json:"sessions"`
+	// CaptureGaps counts sessions whose current transcript can no longer be
+	// captured (rewritten or over the size limit); their last published
+	// snapshot, if any, stays retained. It is a recorded gap, not an error.
+	CaptureGaps     int       `json:"capture_gaps,omitempty"`
 	LastPublishedAt time.Time `json:"last_published_at,omitempty"`
 }
 type statusView struct {
@@ -61,7 +65,11 @@ func runStatusCommand(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	fmt.Fprintf(stdout, "Projects:      %d included\nPending:       %d session(s)\nLast scan:     %s\nLast publish:  %s\n", len(view.Projects), view.Collector.PendingCount, formatTimeOrNever(view.Collector.LastScanAt), formatTimeOrNever(view.Collector.LastPublishedAt))
 	for _, app := range view.Apps {
-		fmt.Fprintf(stdout, "%s: %s (%d session(s)); hooks %s\n", appName(app.Name), app.State, app.Sessions, app.Hooks)
+		gaps := ""
+		if app.CaptureGaps > 0 {
+			gaps = fmt.Sprintf("; %d with a capture gap", app.CaptureGaps)
+		}
+		fmt.Fprintf(stdout, "%s: %s (%d session(s)%s); hooks %s\n", appName(app.Name), app.State, app.Sessions, gaps, app.Hooks)
 	}
 	if view.Collector.LastError != "" {
 		fmt.Fprintf(stdout, "Last error:    %s\n", view.Collector.LastError)
@@ -134,10 +142,15 @@ func readStatus(env Env) (view statusView, err error) {
 			if err != nil {
 				return view, err
 			}
-			if found && app.LastPublishedAt.IsZero() {
+			if state == collector.CacheStatusBlocked {
+				app.CaptureGaps++
+			}
+			// A blocked session with no publication has captured nothing;
+			// one that was published earlier still counts as published below.
+			if found && state != collector.CacheStatusBlocked && app.LastPublishedAt.IsZero() {
 				app.State = "captured locally"
 			}
-			if state == collector.CacheStatusPublished || (state == collector.CacheStatusRateLimited && !at.IsZero()) {
+			if state == collector.CacheStatusPublished || ((state == collector.CacheStatusRateLimited || state == collector.CacheStatusBlocked) && !at.IsZero()) {
 				app.State = "published; source verified"
 				if at.After(app.LastPublishedAt) {
 					app.LastPublishedAt = at
