@@ -190,25 +190,26 @@ func (s *LocalStore) loadRequest(archiveSessionID string) (Request, bool, error)
 
 // ensureRequestToken upgrades a request written by an older collector. The
 // token is assigned under the same lock used by hooks and acknowledgements so
-// migration cannot overwrite a concurrent hook update.
-func (s *LocalStore) ensureRequestToken(archiveSessionID string) (Request, error) {
+// migration cannot overwrite a concurrent hook update. found is false when
+// the request disappeared between listing and upgrade.
+func (s *LocalStore) ensureRequestToken(archiveSessionID string) (Request, bool, error) {
 	unlock, err := local.NamedLockWait(s.home, filepath.Join("request-locks", archiveSessionID+".lock"), time.Second)
 	if err != nil {
-		return Request{}, fmt.Errorf("lock request %q: %w", archiveSessionID, err)
+		return Request{}, false, fmt.Errorf("lock request %q: %w", archiveSessionID, err)
 	}
 	defer unlock()
 	request, found, err := s.loadRequest(archiveSessionID)
 	if err != nil || !found || request.Token != "" {
-		return request, err
+		return request, found, err
 	}
 	request.Token, err = local.ID()
 	if err != nil {
-		return Request{}, fmt.Errorf("generate request token: %w", err)
+		return Request{}, false, fmt.Errorf("generate request token: %w", err)
 	}
 	if err := local.Write(s.requestPath(archiveSessionID), request); err != nil {
-		return Request{}, fmt.Errorf("upgrade request %q: %w", archiveSessionID, err)
+		return Request{}, false, fmt.Errorf("upgrade request %q: %w", archiveSessionID, err)
 	}
-	return request, nil
+	return request, true, nil
 }
 
 // LoadRequests returns every pending request, sorted by archive session ID.
@@ -283,6 +284,25 @@ const (
 	// CacheStatusRateLimited, it must never auto-publish just because time
 	// passed — only a genuine further content change reconsiders it.
 	CacheStatusDeclined CacheStatus = "declined"
+	// CacheStatusBlocked means the session's current transcript can no longer
+	// be captured safely (see BlockedReason) and, unlike a transient failure,
+	// the condition cannot clear by retrying: it is a recorded capture gap,
+	// not an error. The last published snapshot stays retained and any
+	// outstanding request is acknowledged, so later passes are no-ops until
+	// the transcript changes again.
+	CacheStatusBlocked CacheStatus = "blocked"
+)
+
+// BlockedReason says why a session sits in CacheStatusBlocked.
+type BlockedReason string
+
+const (
+	// BlockedReasonTranscriptRewritten means the transcript was truncated,
+	// compacted, or rewritten so it no longer extends the retained evidence.
+	BlockedReasonTranscriptRewritten BlockedReason = "transcript_rewritten"
+	// BlockedReasonTranscriptTooLarge means the transcript exceeds the
+	// collection size limit (Options.MaxTranscriptBytes).
+	BlockedReasonTranscriptTooLarge BlockedReason = "transcript_too_large"
 )
 
 // publishedState is the small local cache of what was last built for a
@@ -294,6 +314,8 @@ type publishedState struct {
 	Bundle        archive.SourceBundle `json:"bundle"`
 	PublishedAt   time.Time            `json:"published_at"`
 	Status        CacheStatus          `json:"status"`
+	// BlockedReason is set only while Status is CacheStatusBlocked.
+	BlockedReason BlockedReason `json:"blocked_reason,omitempty"`
 	// LastPublished survives a newer rate-limited or declined candidate so
 	// compaction checks and retention always have the actual remote baseline.
 	LastPublished *publishedSnapshot `json:"last_published,omitempty"`
@@ -312,6 +334,21 @@ func (s *LocalStore) publishedPath(archiveSessionID string) string {
 // session, so the next scan can compare against it instead of rebuilding
 // from scratch. See CacheStatus for what each status means for retry.
 func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, metadata ...[]byte) error {
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, status, "", metadata)
+}
+
+// SaveBlocked records a terminal capture gap for a session (see
+// CacheStatusBlocked). bundle is what the next scan compares against and
+// publishedAt is the last actual publish time, if any; the last published
+// snapshot itself is preserved exactly as SavePublished preserves it.
+func (s *LocalStore) SaveBlocked(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, reason BlockedReason) error {
+	if reason == "" {
+		return errors.New("blocked reason is required")
+	}
+	return s.savePublishedState(archiveSessionID, bundle, publishedAt, CacheStatusBlocked, reason, nil)
+}
+
+func (s *LocalStore) savePublishedState(archiveSessionID string, bundle archive.SourceBundle, publishedAt time.Time, status CacheStatus, reason BlockedReason, metadata [][]byte) error {
 	if !safeFileComponent(archiveSessionID) {
 		return errors.New("archive session ID is not a safe file name component")
 	}
@@ -329,7 +366,23 @@ func (s *LocalStore) SavePublished(archiveSessionID string, bundle archive.Sourc
 	if status == CacheStatusPublished {
 		last = &publishedSnapshot{Bundle: bundle, PublishedAt: publishedAt}
 	}
-	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
+	return local.Write(s.publishedPath(archiveSessionID), publishedState{Bundle: bundle, PublishedAt: publishedAt, Status: status, BlockedReason: reason, LastPublished: last, MetadataBytes: publicationMetadata(existing.MetadataBytes, metadata)})
+}
+
+// LoadBlocked reports whether a session is in CacheStatusBlocked and why.
+func (s *LocalStore) LoadBlocked(archiveSessionID string) (BlockedReason, bool, error) {
+	var state publishedState
+	readErr := local.Read(s.publishedPath(archiveSessionID), &state)
+	if errors.Is(readErr, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if readErr != nil {
+		return "", false, fmt.Errorf("read published state %q: %w", archiveSessionID, readErr)
+	}
+	if state.Status != CacheStatusBlocked {
+		return "", false, nil
+	}
+	return state.BlockedReason, true, nil
 }
 
 // LoadPublished returns the last cached bundle for a session, if any.
