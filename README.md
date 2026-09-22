@@ -51,20 +51,8 @@ python3 scripts/validate.py
 python3 -m unittest discover -s tests -v
 ```
 
-## Private skill history
+## Related
 
-`agent-archive` is a small macOS CLI (in [`agent-archive/`](agent-archive/)) that keeps a private, local-first archive of your Codex, Claude Code, and Cursor sessions in a bucket you own. It installs lifecycle hooks in each app, runs a background collector that uploads session transcripts and metadata to a private Cloudflare R2 or Amazon S3 bucket, and prunes them on a retention schedule. No account or hosted service is involved.
+[agent-archive](https://github.com/wangjohn/agent-archive) is a macOS CLI that keeps a private, local-first archive of your Codex, Claude Code, and Cursor sessions in a bucket you own. It used to live in this repo and now has its own.
 
-Commands:
-
-- `agent-archive setup` guides first-time setup or a safe reconfiguration.
-- `agent-archive status` shows storage, collector, hooks, and capture coverage.
-- `agent-archive sync` runs one collection and upload pass now.
-- `agent-archive pause` and `agent-archive resume` suspend and restore scheduled work.
-- `agent-archive list` and `agent-archive show` inspect archived sessions from the bucket, metadata first.
-- `agent-archive uninstall` removes hooks and the collector while keeping local evidence and credentials; `--delete-local-data` explicitly removes owned local data after confirmation. It never touches the bucket.
-
-See [agent-archive/docs/install.md](agent-archive/docs/install.md) for install and uninstall steps, and the [product and engineering specification](docs/agent-run-archive-spec.md) for the design.
-
-The earlier [Python skill-run recorder](docs/skill-runs.md) is retained as a legacy prototype. It uses a separate data format and installation; use the Go CLI above for the current agent archive.
-
+The earlier [Python skill-run recorder](docs/skill-runs.md) is retained as a legacy prototype with its own data format and installation.
