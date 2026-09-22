@@ -88,8 +88,16 @@ func ParseNormalized(bundle SourceBundle) (NormalizedView, error) {
 		return NormalizedView{}, &ParseError{Reason: err.Error()}
 	}
 	view := NormalizedView{}
+	isParentBundle := bundle.ParentSessionID == ""
 	var codexModel, codexReasoning string
 	for i, record := range bundle.NativeRecords {
+		if isParentBundle && isSidechainRecord(record) {
+			// A subagent's records are archived as the child's own session.
+			// Older Claude layouts inline them in the parent transcript; the
+			// parent must not count the same messages, turns, and tool calls
+			// a second time.
+			continue
+		}
 		if bundle.Capture.Harness.Name == "codex" && firstString(record, "type") == "turn_context" {
 			codexModel, codexReasoning = firstStringDeep(record, "model", "model_id"), firstStringDeep(record, "reasoning_effort")
 			continue
@@ -210,6 +218,18 @@ func toolCalls(record map[string]any, index int, model, reasoning string) ([]Nor
 	}
 	walk(record)
 	return calls, skillUses
+}
+
+// isSidechainRecord reports whether a native record belongs to a subagent
+// rather than to the session that owns the transcript. Only an explicit true
+// counts: an absent or non-boolean flag leaves the record in place.
+func isSidechainRecord(record map[string]any) bool {
+	for _, key := range []string{"isSidechain", "is_sidechain"} {
+		if flag, ok := record[key].(bool); ok && flag {
+			return true
+		}
+	}
+	return false
 }
 
 func findVisibleMessage(record map[string]any) (string, string, bool) {

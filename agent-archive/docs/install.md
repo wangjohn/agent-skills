@@ -339,7 +339,11 @@ by parent ID and agent ID. Resumed children retain the original start. Every
 later capture rechecks the mutable native file's identity and start.
 
 `agent-archive show PARENT` adds `linked_session_availability` from direct child
-metadata reads. `metadata_available` does not verify source bytes. Select the
+metadata reads. That field is added by the command, beside the sidecar's own
+fields, so `show` output is a rendering of a metadata object rather than an
+instance of `metadata.schema.json` (which sets `additionalProperties: false`);
+validate stored metadata objects, not command output. `metadata_available` does
+not verify source bytes. Select the
 child explicitly with `agent-archive show CHILD --normalized` for verified
 conversation content. Missing links report pending, unavailable, or
 unavailable-or-expired; one missing child does not block the parent. Links do not

@@ -130,7 +130,11 @@ func rejectSubagentCandidate(local *LocalStore, candidate SubagentCandidate, cod
 }
 
 // Retry link notification from durable publication state even when the child
-// has no new content or its live transcript has gone away.
+// has no new content or its live transcript has gone away. The notification
+// stays urgent so a repaired link reaches the parent on the next pass rather
+// than waiting out the upload debounce; SaveRequest drops evidence the pending
+// request already carries, so retrying a parent that never publishes is a
+// no-op instead of an unbounded append.
 func markPublishedSubagent(local *LocalStore, reg archive.SessionRegistration) error {
 	if reg.ParentSessionID == "" {
 		return nil

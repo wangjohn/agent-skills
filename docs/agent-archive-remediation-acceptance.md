@@ -42,7 +42,10 @@ combination. Lifecycle ordering is deterministic over retained observation
 times; missing native history cannot be reconstructed.
 
 Final local hook measurement with `scripts/measure-hook.py`, 5 warmups and 100
-samples per mode, no collector/cloud/app integration:
+samples per mode, no collector/cloud/app integration. The script takes
+`--event stop` (Codex `Stop`), `--event subagentstop` (Claude `SubagentStop`,
+the path that stages a child capture candidate), or `--event all`; the numbers
+below are the Codex stop scenario:
 
 | Mode | Median | p95 | Maximum |
 | --- | ---: | ---: | ---: |

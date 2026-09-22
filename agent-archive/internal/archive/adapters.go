@@ -168,11 +168,22 @@ var allowedKeys = map[string]bool{
 	"version":     true,
 	"uncertainty": true, "scope": true, "original_bytes": true, "event_id": true,
 	"truncated": true, "omitted_count": true, "snapshot_omitted_count": true, "inventory_complete": true, "root_status": true,
-	"gaps":               true,
-	"skill":              true,
+	"gaps":  true,
+	"skill": true,
+	// Claude Code marks a subagent's records with is_sidechain. Retaining the
+	// flag lets a parent's normalized view exclude any inlined child records
+	// from its own counts; the child is archived as its own session.
+	"is_sidechain": true, "issidechain": true,
 	"file_path":          true,
-	"archive_session_id": true, "relationship": true, "code": true, "detail": true,
+	"archive_session_id": true, "relationship": true,
 }
+
+// captureGapKeys are additionally allowed inside a capture_gap evidence
+// payload, whose whole content is an archive-authored code and its fixed
+// description. They are deliberately not in allowedKeys: `detail` is a
+// common free-text field name in native transcripts, and sanitizeObject
+// recurses, so allowing it globally would retain arbitrary nested prose.
+var captureGapKeys = map[string]bool{"code": true, "detail": true}
 
 var blockedKeys = map[string]bool{
 	"api_key": true, "apikey": true, "access_key": true, "secret": true,
@@ -216,7 +227,9 @@ func filterJSONL(r io.Reader, format string, knownTypes map[string]bool) (Filter
 			result.FirstEventAt = observed
 		}
 		if observed.IsZero() {
-			result.NativeStartComplete = false
+			if recordCarriesConversation(raw) {
+				result.NativeStartComplete = false
+			}
 		} else if result.NativeStartAt.IsZero() || observed.Before(result.NativeStartAt) {
 			result.NativeStartAt = observed
 		}
@@ -267,6 +280,31 @@ func appendUniqueString(values []string, candidate string) []string {
 	return append(values, candidate)
 }
 
+// conversationRecordTypes are the record types whose start time is part of a
+// session's timestamp provenance. Harnesses also write bookkeeping entries
+// beside the conversation — Claude Code's `summary` and `file-history-snapshot`
+// records are the observed examples — which carry no top-level timestamp and
+// no conversational content. Treating those as missing provenance would make
+// an otherwise fully timestamped transcript permanently ineligible for child
+// capture, so only conversation-bearing records are required to be stamped.
+var conversationRecordTypes = map[string]bool{
+	"user": true, "assistant": true, "system": true, "message": true,
+	"tool_use": true, "tool_result": true, "tool_call": true,
+	"session_meta": true, "turn_context": true, "response_item": true,
+	"event_msg": true, "session": true, "event": true,
+}
+
+func recordCarriesConversation(record map[string]any) bool {
+	if _, present := record["message"]; present {
+		return true
+	}
+	if firstString(record, "role") != "" {
+		return true
+	}
+	kind, _ := record["type"].(string)
+	return conversationRecordTypes[strings.ToLower(strings.TrimSpace(kind))]
+}
+
 func parseNativeTimestamp(record map[string]any) time.Time {
 	for _, key := range []string{"timestamp", "created_at"} {
 		value, _ := record[key].(string)
@@ -280,6 +318,10 @@ func parseNativeTimestamp(record map[string]any) time.Time {
 type sanitizeState struct {
 	record int
 	addGap func(string, int, string)
+	// extraAllowed widens the key allowlist for one archive-authored payload
+	// shape. It applies at every depth of that payload, which is safe only
+	// because such payloads are flat maps this repository writes itself.
+	extraAllowed map[string]bool
 }
 
 func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bool) {
@@ -308,7 +350,7 @@ func sanitizeObject(in map[string]any, state *sanitizeState) (map[string]any, bo
 			state.addGap("sensitive_or_hidden_field_omitted", state.record, "field omitted")
 			continue
 		}
-		if !allowedKeys[lower] {
+		if !allowedKeys[lower] && !state.extraAllowed[lower] {
 			state.addGap("unknown_field_omitted", state.record, "field omitted")
 			continue
 		}

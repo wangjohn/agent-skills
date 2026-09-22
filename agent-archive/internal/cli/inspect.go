@@ -236,6 +236,13 @@ func runShowCommand(args []string, stdout, stderr io.Writer, env Env) int {
 
 // Preserve the sidecar fields while exposing live link availability separately.
 // The recorded link status is historical; retention can remove a child later.
+//
+// `linked_session_availability` is a CLI-only field printed beside the
+// sidecar's own fields, so this object is deliberately not an instance of
+// metadata.schema.json, which sets additionalProperties:false. The schema
+// governs stored metadata objects; `show` renders a view of one, and keeping
+// the sidecar's fields at the top level is what existing readers of this
+// command already parse. Validate stored objects, not command output.
 func metadataWithLinks(ctx context.Context, store storage.ObjectStore, metadata archive.Metadata) any {
 	return struct {
 		archive.Metadata

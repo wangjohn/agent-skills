@@ -184,6 +184,9 @@ func FilterSupplementalEvidence(in []SupplementalEvidence) ([]SupplementalEviden
 		state := sanitizeState{addGap: func(code string, _ int, detail string) {
 			gaps = append(gaps, CaptureGap{Code: code, Detail: "supplemental " + detail})
 		}}
+		if evidence.Kind == EvidenceKindCaptureGap {
+			state.extraAllowed = captureGapKeys
+		}
 		payload, keep := sanitizeObject(evidence.Payload, &state)
 		if !keep {
 			gaps = append(gaps, CaptureGap{Code: "supplemental_evidence_omitted", Detail: "no allowed fields"})
@@ -277,6 +280,14 @@ func MergeSupplementalEvidence(previous, fresh []SupplementalEvidence) []Supplem
 		}
 	}
 	return out
+}
+
+// SupplementalEvidenceEqual reports whether two evidence items are the same
+// observation. Callers that accumulate durable hook evidence use it to drop
+// exact repeats, which mergeSupplementalEvidence would discard at publication
+// time anyway, before they can grow a pending request without bound.
+func SupplementalEvidenceEqual(a, b SupplementalEvidence) bool {
+	return supplementalEvidenceEqual(a, b)
 }
 
 func supplementalEvidenceEqual(a, b SupplementalEvidence) bool {

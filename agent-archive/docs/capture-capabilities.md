@@ -35,6 +35,15 @@ unavailable until their native identity formats are proven.
 when resuming or messaging an existing agent. A stop stages a local candidate;
 background collection establishes native eligibility. Nothing reads the child
 transcript or contacts storage in the hook.
+
+"Complete timestamp provenance" applies to conversation-bearing records only.
+Claude Code interleaves bookkeeping entries with no top-level timestamp —
+`summary` and `file-history-snapshot` are the observed cases — and those do not
+count against provenance; a `user`, `assistant`, `system`, or tool record
+without a timestamp still rejects the child. A parent transcript that inlines a
+subagent's records marks them `isSidechain`, and the parent's normalized view
+excludes them from its own message, turn, and tool counts.
+
 ## Installed version versus captured version
 
 `installed_version` comes from setup-time discovery and is labelled by
