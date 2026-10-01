@@ -25,6 +25,9 @@ skills/
   create-skill/
     SKILL.md
     references/
+  implement-with-subagents/
+    SKILL.md
+    references/
   review-pr/
     SKILL.md
 ```
@@ -34,6 +37,8 @@ Each skill is a directory whose name matches the `name` field in `SKILL.md`. Kee
 Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This repo is the portable source of truth.
 
 `review-pr` runs native code review and design review in separate contexts, then combines them into a human guide: a short summary, change map, design decisions, proposed fixes, and coverage. It uses code-first explanations and supports design-only requests. Try: “Use review-pr to review PR <url>.”
+
+`implement-with-subagents` keeps the main session as orchestrator, maintains a scratch implementation plan, delegates one implementer per PR, and assigns independent reviewers to find and fix defects. Choose merge or handoff mode; the workflow adapts to available local or cloud agent capabilities. Try: “Use implement-with-subagents to implement <task>; prepare PRs for me to merge.”
 
 ## Add a skill
 
