@@ -30,6 +30,8 @@ skills/
     references/
   review-pr/
     SKILL.md
+  review-implementation/
+    SKILL.md
 ```
 
 Each skill is a directory whose name matches the `name` field in `SKILL.md`. Keep the body short. Put long docs in `references/` and anything deterministic in `scripts/`.
@@ -39,6 +41,8 @@ Do not put Cursor-only frontmatter (`globs`, `alwaysApply`) in these files. This
 `review-pr` runs native code review and design review in separate contexts, then combines them into a human guide: a short summary, change map, design decisions, proposed fixes, and coverage. It uses code-first explanations and supports design-only requests. Try: “Use review-pr to review PR <url>.”
 
 `implement-with-subagents` keeps the main session as orchestrator, maintains a scratch implementation plan, delegates one implementer per PR, and assigns independent reviewers to find and fix defects. Choose merge or handoff mode; the workflow adapts to available local or cloud agent capabilities. Try: “Use implement-with-subagents to implement <task>; prepare PRs for me to merge.”
+
+`review-implementation` checks the combined implementation against a plan, including temporary or untracked plans. It traces requirements to working behavior and substantial changes back to their purpose, then reviews integration, architecture, performance, and verification gaps. It reports findings and proposed corrections without changing code. Try: “Use review-implementation to review this worktree against /path/to/plan.md.”
 
 ## Add a skill
 
