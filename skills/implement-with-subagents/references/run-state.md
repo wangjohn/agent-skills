@@ -22,11 +22,13 @@ Use this as a starting point for the run's `plan.md`. Keep it concise and update
 - Changes or revocations to authorization:
 - Merge method:
 - Concurrency and any user time/cost limits:
-- Review/fix limit: 3 per PR; final verification-only pass if needed
+- Review/repair/verification passes: no built-in cap; continue until the readiness gate passes
+- Repeated-repair notice: at five repair passes per PR; include count and progress in subsequent summaries
+- Status summaries: every 30 minutes during active work; brief updates promptly at actionable milestones
 
 ## PR plan
-| ID | Scope | Depends on | Branch / base | State | PR |
-|---|---|---|---|---|---|
+| ID | Scope | Depends on | Branch / base | State | PR | Next action / owner | Wait condition / next check |
+|---|---|---|---|---|---|---|---|
 
 States: planned, implementing, reviewing, fixing, verifying,
 waiting-checks, technically-ready, awaiting-approval, awaiting-user-merge,
@@ -45,11 +47,15 @@ In handoff mode, awaiting-user-merge can satisfy the run's deliverable.
 - Draft status:
 - Reviewer IDs, statuses, reports, and reviewed heads:
 - Findings: ID / evidence / disposition / fix commit or blocker
-- Review/fix pass count:
+- Cumulative repair pass count (reviewer cycles that changed code):
+- Verification-only pass count:
+- Repeated-repair notice: sent at / count / findings / next approach:
 - Checks: command or CI URL / outcome / commit or merge candidate
 - Technical readiness evidence and remaining conditions:
 - Merge eligibility: authorization / approvals / protections / candidate checks
 - Merge result, if applicable:
+- Next action and owner:
+- Wait condition, next check, and any required user action:
 
 ## Integration
 - Intended merge order:
@@ -58,10 +64,21 @@ In handoff mode, awaiting-user-merge can satisfy the run's deliverable.
 - Checks and results:
 - Gaps or blockers:
 
+## User-facing status
+- Last summary timestamp:
+- Merged PRs:
+- Running PRs and stages (include repair counts at five or more):
+- Ready or queued PRs and merge order:
+- Blocked or awaiting-user PRs: link / reason / exact action / owner:
+- User action needed, or explicitly none:
+- Next status/check time:
+
 ## Next actions and recovery
 - Active workers and their owned resources:
 - Next eligible work:
 - User decisions needed:
+- Unfinished PR reconciliation: each has active work, a dispatched next step, an owned wait, or an explicit handoff:
+- If ending the turn: handed-off actions and any workers or arranged monitoring that will continue:
 - Recoverable branches, patches, and artifacts:
 
 ## Milestones
