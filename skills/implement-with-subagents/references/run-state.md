@@ -51,8 +51,10 @@ In handoff mode, awaiting-user-merge can satisfy the run's deliverable.
 - Verification-only pass count:
 - Repeated-repair notice: sent at / count / findings / next approach:
 - Checks: command or CI URL / outcome / commit or merge candidate
+- Evidence carried forward after target movement or branch updates: original checked/reviewed commits / diff inspection / why evidence still applies
+- Conflict resolutions or substantive/dependency changes: affected behavior / evidence invalidated / targeted validation
 - Technical readiness evidence and remaining conditions:
-- Merge eligibility: authorization / approvals / protections / candidate checks
+- Merge eligibility: authorization / approvals / protections / repository-required checks
 - Merge result, if applicable:
 - Next action and owner:
 - Wait condition, next check, and any required user action:
